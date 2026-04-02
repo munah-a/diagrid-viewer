@@ -1,0 +1,43 @@
+export default [
+  {
+    files: ['src/**/*.js', 'tests/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      globals: {
+        window: 'readonly',
+        document: 'readonly',
+        console: 'readonly',
+        fetch: 'readonly',
+        performance: 'readonly',
+        setTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearInterval: 'readonly',
+        requestAnimationFrame: 'readonly',
+        cancelAnimationFrame: 'readonly',
+        URL: 'readonly',
+        Blob: 'readonly',
+        Worker: 'readonly',
+        FileReader: 'readonly',
+        HTMLElement: 'readonly',
+        Float64Array: 'readonly',
+        Map: 'readonly',
+        Set: 'readonly',
+        Promise: 'readonly',
+      },
+    },
+    rules: {
+      'no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+      'no-undef': 'error',
+      'no-constant-condition': 'warn',
+      'no-debugger': 'error',
+      'no-duplicate-case': 'error',
+      'no-empty': 'warn',
+      'no-redeclare': 'error',
+      'eqeqeq': ['warn', 'always'],
+    },
+  },
+  {
+    ignores: ['dist/', 'node_modules/', 'public/', '*.config.js', '*.config.cjs'],
+  },
+];

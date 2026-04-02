@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>FEM Solver Physics Tests</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 24px; }
+  h1 { color: #00d4ff; margin-bottom: 8px; }
+  .summary { font-size: 18px; margin-bottom: 24px; padding: 12px 16px; border-radius: 8px; }
+  .summary.pass { background: #0a3d0a; border: 1px solid #2ecc71; }
+  .summary.fail { background: #3d0a0a; border: 1px solid #e74c3c; }
+  .suite { margin-bottom: 20px; background: #16213e; border-radius: 8px; overflow: hidden; }
+  .suite-header { padding: 12px 16px; font-weight: bold; font-size: 16px; cursor: pointer; display: flex; justify-content: space-between; }
+  .suite-header.pass { background: #1a4a2a; }
+  .suite-header.fail { background: #4a1a1a; }
+  .suite-body { padding: 8px 16px 12px; }
+  .test { padding: 4px 0; font-size: 13px; font-family: 'Consolas', monospace; }
+  .test.pass { color: #2ecc71; }
+  .test.fail { color: #e74c3c; font-weight: bold; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }
+  .badge.pass { background: #2ecc71; color: #000; }
+  .badge.fail { background: #e74c3c; color: #fff; }
+  .detail { color: #888; font-size: 12px; margin-left: 20px; }
+</style>
+</head>
+<body>
+<h1>FEM Solver Physics Tests</h1>
+<div id="summary"></div>
+<div id="results"></div>
+
+<script>
+// ============================================================
+// SOLVER CODE (copied from diagrid-viewer.html lines 2045-2111)
+// ============================================================
+
+function build3DFrameLocalK(L,E,A,Iy,Iz,G,J) {
+  const K = Array.from({length:12}, ()=>new Float64Array(12));
+  const EA_L=E*A/L, GJ_L=G*J/L, L2=L*L, L3=L*L*L;
+  K[0][0]=EA_L; K[0][6]=-EA_L; K[6][0]=-EA_L; K[6][6]=EA_L;
+  K[3][3]=GJ_L; K[3][9]=-GJ_L; K[9][3]=-GJ_L; K[9][9]=GJ_L;
+  const c1=12*E*Iy/L3,c2=6*E*Iy/L2,c3=4*E*Iy/L,c4=2*E*Iy/L;
+  K[2][2]=c1;K[2][4]=-c2;K[2][8]=-c1;K[2][10]=-c2;
+  K[4][2]=-c2;K[4][4]=c3;K[4][8]=c2;K[4][10]=c4;
+  K[8][2]=-c1;K[8][4]=c2;K[8][8]=c1;K[8][10]=c2;
+  K[10][2]=-c2;K[10][4]=c4;K[10][8]=c2;K[10][10]=c3;
+  const d1=12*E*Iz/L3,d2=6*E*Iz/L2,d3=4*E*Iz/L,d4=2*E*Iz/L;
+  K[1][1]=d1;K[1][5]=d2;K[1][7]=-d1;K[1][11]=d2;
+  K[5][1]=d2;K[5][5]=d3;K[5][7]=-d2;K[5][11]=d4;
+  K[7][1]=-d1;K[7][5]=-d2;K[7][7]=d1;K[7][11]=-d2;
+  K[11][1]=d2;K[11][5]=d4;K[11][7]=-d2;K[11][11]=d3;
+  return K;
+}
+
+function buildRotationMatrix(n1,n2) {
+  const dx=n2.x-n1.x,dy=n2.y-n1.y,dz=n2.z-n1.z;
+  const L=Math.sqrt(dx*dx+dy*dy+dz*dz);
+  const lx=dx/L,ly=dy/L,lz=dz/L;
+  let refX,refY,refZ;
+  if(Math.abs(lz)>0.95){refX=1;refY=0;refZ=0;}else{refX=0;refY=0;refZ=1;}
+  let yx=refY*lz-refZ*ly,yy=refZ*lx-refX*lz,yz=refX*ly-refY*lx;
+  const ym=Math.sqrt(yx*yx+yy*yy+yz*yz);yx/=ym;yy/=ym;yz/=ym;
+  return [[lx,ly,lz],[yx,yy,yz],[ly*yz-lz*yy,lz*yx-lx*yz,lx*yy-ly*yx]];
+}
+
+function transformKtoGlobal(Kl,R3) {
+  const T=Array.from({length:12},()=>new Float64Array(12));
+  for(let b=0;b<4;b++)for(let i=0;i<3;i++)for(let j=0;j<3;j++)T[b*3+i][b*3+j]=R3[i][j];
+  const tmp=Array.from({length:12},()=>new Float64Array(12));
+  for(let i=0;i<12;i++)for(let j=0;j<12;j++){let s=0;for(let k=0;k<12;k++)s+=Kl[i][k]*T[k][j];tmp[i][j]=s;}
+  const Kg=Array.from({length:12},()=>new Float64Array(12));
+  for(let i=0;i<12;i++)for(let j=0;j<12;j++){let s=0;for(let k=0;k<12;k++)s+=T[k][i]*tmp[k][j];Kg[i][j]=s;}
+  return Kg;
+}
+
+class SparseMatrix {
+  constructor(n){this.n=n;this.rows=new Map();}
+  add(i,j,v){if(Math.abs(v)<1e-20)return;if(!this.rows.has(i))this.rows.set(i,new Map());const r=this.rows.get(i);r.set(j,(r.get(j)||0)+v);}
+  mulVec(x,y){y.fill(0);this.rows.forEach((cols,i)=>{let s=0;cols.forEach((v,j)=>{s+=v*x[j];});y[i]=s;});}
+  getDiag(i){const r=this.rows.get(i);return r?(r.get(i)||0):0;}
+  setRowCol(idx,dv){this.rows.set(idx,new Map([[idx,dv]]));this.rows.forEach((cols,i)=>{if(i!==idx&&cols.has(idx))cols.delete(idx);});}
+}
+
+function solveCG(K,F) {
+  const n=K.n,x=new Float64Array(n),r=new Float64Array(n),z=new Float64Array(n),p=new Float64Array(n),Ap=new Float64Array(n);
+  const Minv=new Float64Array(n);
+  for(let i=0;i<n;i++){const d=K.getDiag(i);Minv[i]=d>1e-20?1/d:1;}
+  r.set(F);for(let i=0;i<n;i++)z[i]=Minv[i]*r[i];p.set(z);
+  let rz=0;for(let i=0;i<n;i++)rz+=r[i]*z[i];
+  const Fn=Math.sqrt(F.reduce((s,v)=>s+v*v,0))||1;
+  let iter=0,residual=1;
+  for(iter=0;iter<8000;iter++){
+    K.mulVec(p,Ap);let pAp=0;for(let i=0;i<n;i++)pAp+=p[i]*Ap[i];
+    if(Math.abs(pAp)<1e-30)break;const alpha=rz/pAp;
+    for(let i=0;i<n;i++){x[i]+=alpha*p[i];r[i]-=alpha*Ap[i];}
+    residual=Math.sqrt(r.reduce((s,v)=>s+v*v,0))/Fn;
+    if(residual<1e-8)break;
+    for(let i=0;i<n;i++)z[i]=Minv[i]*r[i];
+    let rz2=0;for(let i=0;i<n;i++)rz2+=r[i]*z[i];
+    const beta=rz2/(rz||1e-30);for(let i=0;i<n;i++)p[i]=z[i]+beta*p[i];rz=rz2;
+  }
+  return {x,iterations:iter,residual};
+}
+
+// ============================================================
+// HELPER: Assemble and solve a mini structure
+// ============================================================
+function assembleAndSolve(nodes, elements, supports, forces, E, G, sectionProps) {
+  const {A, Iy, Iz, J} = sectionProps;
+  const nDof = nodes.length * 6;
+  const K = new SparseMatrix(nDof);
+  const F = new Float64Array(nDof);
+
+  // Build node index map
+  const nIdx = new Map();
+  nodes.forEach((n, i) => nIdx.set(n.id, i));
+
+  // Assemble global stiffness
+  for (const el of elements) {
+    const n1 = nodes[nIdx.get(el.n1)];
+    const n2 = nodes[nIdx.get(el.n2)];
+    const dx = n2.x-n1.x, dy = n2.y-n1.y, dz = n2.z-n1.z;
+    const L = Math.sqrt(dx*dx+dy*dy+dz*dz);
+    const Kl = build3DFrameLocalK(L, E, A, Iy, Iz, G, J);
+    const R3 = buildRotationMatrix(n1, n2);
+    const Kg = transformKtoGlobal(Kl, R3);
+    const si = nIdx.get(el.n1), ei = nIdx.get(el.n2);
+    const dofs = [];
+    for (let d=0;d<6;d++) dofs.push(si*6+d);
+    for (let d=0;d<6;d++) dofs.push(ei*6+d);
+    for (let i=0;i<12;i++) for (let j=0;j<12;j++) K.add(dofs[i], dofs[j], Kg[i][j]);
+  }
+
+  // Apply forces
+  for (const f of forces) {
+    const idx = nIdx.get(f.node);
+    if (f.fx !== undefined) F[idx*6]   += f.fx;
+    if (f.fy !== undefined) F[idx*6+1] += f.fy;
+    if (f.fz !== undefined) F[idx*6+2] += f.fz;
+    if (f.mx !== undefined) F[idx*6+3] += f.mx;
+    if (f.my !== undefined) F[idx*6+4] += f.my;
+    if (f.mz !== undefined) F[idx*6+5] += f.mz;
+  }
+
+  // Store pre-BC force vector for reaction computation
+  const Fapplied = new Float64Array(F);
+
+  // Apply boundary conditions (penalty method)
+  const restrained = new Set();
+  for (const s of supports) {
+    const base = nIdx.get(s.node) * 6;
+    if (s.type === 'fixed') {
+      for (let d=0;d<6;d++) restrained.add(base+d);
+    } else if (s.type === 'pinned') {
+      restrained.add(base); restrained.add(base+1); restrained.add(base+2);
+    } else if (s.type === 'roller') {
+      const off = s.dir === 'x' ? 0 : s.dir === 'y' ? 1 : 2;
+      restrained.add(base + off);
+    }
+  }
+  restrained.forEach(idx => { K.setRowCol(idx, 1e15); F[idx] = 0; });
+
+  // Solve
+  const result = solveCG(K, F);
+
+  // Recover member forces
+  const memberForces = elements.map(el => {
+    const n1 = nodes[nIdx.get(el.n1)];
+    const n2 = nodes[nIdx.get(el.n2)];
+    const dx = n2.x-n1.x, dy = n2.y-n1.y, dz = n2.z-n1.z;
+    const L = Math.sqrt(dx*dx+dy*dy+dz*dz);
+    const Kl = build3DFrameLocalK(L, E, A, Iy, Iz, G, J);
+    const R3 = buildRotationMatrix(n1, n2);
+    const T = Array.from({length:12},()=>new Float64Array(12));
+    for(let b=0;b<4;b++) for(let i=0;i<3;i++) for(let j=0;j<3;j++) T[b*3+i][b*3+j]=R3[i][j];
+    const si = nIdx.get(el.n1), ei = nIdx.get(el.n2);
+    const ug = new Float64Array(12);
+    for(let d=0;d<6;d++){ug[d]=result.x[si*6+d];ug[6+d]=result.x[ei*6+d];}
+    const ul = new Float64Array(12);
+    for(let i=0;i<12;i++){let s=0;for(let j=0;j<12;j++)s+=T[i][j]*ug[j];ul[i]=s;}
+    const fl = new Float64Array(12);
+    for(let i=0;i<12;i++){let s=0;for(let j=0;j<12;j++)s+=Kl[i][j]*ul[j];fl[i]=s;}
+    return {axial:fl[0], shearY:fl[1], shearZ:fl[2], torsion:fl[3],
+            momentY_1:fl[4], momentZ_1:fl[5], momentY_2:fl[10], momentZ_2:fl[11],
+            fl: Array.from(fl)};
+  });
+
+  return {displacements: result.x, memberForces, iterations: result.iterations,
+          residual: result.residual, nDof, restrained, Fapplied, nIdx};
+}
+
+// ============================================================
+// TEST FRAMEWORK
+// ============================================================
+let totalPass = 0, totalFail = 0;
+const suites = [];
+
+function suite(name, fn) {
+  const tests = [];
+  let pass = 0, fail = 0;
+  function assert(cond, msg, detail) {
+    if (cond) { pass++; totalPass++; tests.push({pass:true, msg}); }
+    else { fail++; totalFail++; tests.push({pass:false, msg, detail}); }
+  }
+  function assertClose(actual, expected, tol, msg) {
+    const err = Math.abs(actual - expected);
+    const relErr = expected !== 0 ? err / Math.abs(expected) : err;
+    const ok = relErr < tol || err < 1e-10;
+    const detail = `expected ${expected.toExponential(6)}, got ${actual.toExponential(6)}, relErr=${(relErr*100).toFixed(4)}%`;
+    assert(ok, msg, detail);
+  }
+  fn(assert, assertClose);
+  suites.push({name, tests, pass, fail});
+}
+
+// ============================================================
+// CHS SECTION PROPERTIES (for tests)
+// ============================================================
+function getCHS(D_mm, t_mm) {
+  const Do = D_mm / 1000, Di = Do - 2 * t_mm / 1000;
+  const A = Math.PI/4 * (Do*Do - Di*Di);
+  const I = Math.PI/64 * (Do**4 - Di**4);
+  const J = Math.PI/32 * (Do**4 - Di**4);
+  return {A, Iy:I, Iz:I, J};
+}
+
+// ============================================================
+// TEST 1: SparseMatrix Basics
+// ============================================================
+suite('Test 1: SparseMatrix Basics', (assert, assertClose) => {
+  const M = new SparseMatrix(3);
+  M.add(0,0,4); M.add(0,1,-1);
+  M.add(1,0,-1); M.add(1,1,3); M.add(1,2,1);
+  M.add(2,1,1); M.add(2,2,5);
+
+  // getDiag
+  assertClose(M.getDiag(0), 4, 1e-12, 'getDiag(0) = 4');
+  assertClose(M.getDiag(1), 3, 1e-12, 'getDiag(1) = 3');
+  assertClose(M.getDiag(2), 5, 1e-12, 'getDiag(2) = 5');
+
+  // mulVec: M * [1,2,3] = [4-2, -1+6+3, 2+15] = [2, 8, 17]
+  const x = new Float64Array([1,2,3]);
+  const y = new Float64Array(3);
+  M.mulVec(x, y);
+  assertClose(y[0], 2, 1e-12, 'mulVec result[0] = 2');
+  assertClose(y[1], 8, 1e-12, 'mulVec result[1] = 8');
+  assertClose(y[2], 17, 1e-12, 'mulVec result[2] = 17');
+
+  // setRowCol: enforce BC at row 1
+  M.setRowCol(1, 1e15);
+  assertClose(M.getDiag(1), 1e15, 1e-12, 'setRowCol sets diagonal to penalty');
+  // Off-diag in row 1 should be cleared
+  const y2 = new Float64Array(3);
+  M.mulVec(new Float64Array([0,1,0]), y2);
+  assertClose(y2[0], 0, 1e-12, 'setRowCol clears column entries');
+  assertClose(y2[1], 1e15, 1e-6, 'setRowCol row * [0,1,0] = penalty');
+
+  // Zero values ignored
+  const M2 = new SparseMatrix(2);
+  M2.add(0,0,0);  // Should be ignored (< 1e-20)
+  assertClose(M2.getDiag(0), 0, 1e-12, 'Zero values are not stored');
+});
+
+// ============================================================
+// TEST 2: CG Solver Known System
+// ============================================================
+suite('Test 2: CG Solver Known System', (assert, assertClose) => {
+  // Solve [4,-1;-1,3]*x = [1,2]  => x = [5/11, 9/11]
+  const K = new SparseMatrix(2);
+  K.add(0,0,4); K.add(0,1,-1);
+  K.add(1,0,-1); K.add(1,1,3);
+  const F = new Float64Array([1,2]);
+  const result = solveCG(K, F);
+
+  assertClose(result.x[0], 5/11, 1e-6, 'x[0] = 5/11 = 0.4545...');
+  assertClose(result.x[1], 9/11, 1e-6, 'x[1] = 9/11 = 0.8181...');
+  assert(result.residual < 1e-8, `Residual ${result.residual.toExponential(3)} < 1e-8`);
+  assert(result.iterations < 100, `Converged in ${result.iterations} iterations (< 100)`);
+
+  // Test 3x3 identity: I*x = [3,5,7] => x = [3,5,7]
+  const K2 = new SparseMatrix(3);
+  K2.add(0,0,1); K2.add(1,1,1); K2.add(2,2,1);
+  const F2 = new Float64Array([3,5,7]);
+  const r2 = solveCG(K2, F2);
+  assertClose(r2.x[0], 3, 1e-8, 'Identity system: x[0] = 3');
+  assertClose(r2.x[1], 5, 1e-8, 'Identity system: x[1] = 5');
+  assertClose(r2.x[2], 7, 1e-8, 'Identity system: x[2] = 7');
+
+  // Test larger SPD system: tridiagonal
+  const n = 50;
+  const K3 = new SparseMatrix(n);
+  const F3 = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    K3.add(i, i, 4);
+    if (i > 0) K3.add(i, i-1, -1);
+    if (i < n-1) K3.add(i, i+1, -1);
+    F3[i] = 1;
+  }
+  const r3 = solveCG(K3, F3);
+  assert(r3.residual < 1e-8, `50x50 tridiagonal: residual ${r3.residual.toExponential(3)} < 1e-8`);
+  // Verify K*x = F
+  const Kx = new Float64Array(n);
+  K3.mulVec(r3.x, Kx);
+  let maxDiff = 0;
+  for (let i = 0; i < n; i++) maxDiff = Math.max(maxDiff, Math.abs(Kx[i] - F3[i]));
+  assert(maxDiff < 1e-6, `K*x - F max error: ${maxDiff.toExponential(3)} < 1e-6`);
+});
+
+// ============================================================
+// TEST 3: Local Stiffness Matrix Properties
+// ============================================================
+suite('Test 3: Local Stiffness Matrix Properties', (assert, assertClose) => {
+  const L = 3.0, E = 200e6, G = 77e6;
+  const sec = getCHS(323.9, 10);
+
+  const Kl = build3DFrameLocalK(L, E, sec.A, sec.Iy, sec.Iz, G, sec.J);
+
+  // Symmetry check
+  let symErr = 0;
+  for (let i = 0; i < 12; i++) for (let j = 0; j < 12; j++)
+    symErr = Math.max(symErr, Math.abs(Kl[i][j] - Kl[j][i]));
+  assert(symErr < 1e-6, `Symmetry: max |K[i][j]-K[j][i]| = ${symErr.toExponential(3)} < 1e-6`);
+
+  // Check specific diagonal terms
+  assertClose(Kl[0][0], E*sec.A/L, 1e-10, `K[0][0] = EA/L = ${(E*sec.A/L).toExponential(4)}`);
+  assertClose(Kl[3][3], G*sec.J/L, 1e-10, `K[3][3] = GJ/L = ${(G*sec.J/L).toExponential(4)}`);
+  assertClose(Kl[2][2], 12*E*sec.Iy/(L*L*L), 1e-10, `K[2][2] = 12EIy/L^3`);
+  assertClose(Kl[1][1], 12*E*sec.Iz/(L*L*L), 1e-10, `K[1][1] = 12EIz/L^3`);
+  assertClose(Kl[4][4], 4*E*sec.Iy/L, 1e-10, `K[4][4] = 4EIy/L`);
+  assertClose(Kl[5][5], 4*E*sec.Iz/L, 1e-10, `K[5][5] = 4EIz/L`);
+
+  // Rigid body translation: K * [1,0,0,0,0,0, 1,0,0,0,0,0] = 0
+  // (uniform translation in local x should produce zero forces)
+  const u_rigid = new Float64Array([1,0,0,0,0,0, 1,0,0,0,0,0]);
+  const f = new Float64Array(12);
+  for (let i=0;i<12;i++){let s=0;for(let j=0;j<12;j++)s+=Kl[i][j]*u_rigid[j];f[i]=s;}
+  let maxF = 0; for (let i=0;i<12;i++) maxF=Math.max(maxF,Math.abs(f[i]));
+  assert(maxF < 1e-4, `Rigid body x-translation: max force = ${maxF.toExponential(3)} ~ 0`);
+
+  // Rigid body y-translation
+  const u_ry = new Float64Array([0,1,0,0,0,0, 0,1,0,0,0,0]);
+  const fy = new Float64Array(12);
+  for (let i=0;i<12;i++){let s=0;for(let j=0;j<12;j++)s+=Kl[i][j]*u_ry[j];fy[i]=s;}
+  let maxFy = 0; for (let i=0;i<12;i++) maxFy=Math.max(maxFy,Math.abs(fy[i]));
+  assert(maxFy < 1e-4, `Rigid body y-translation: max force = ${maxFy.toExponential(3)} ~ 0`);
+
+  // Positive semi-definite: u^T K u >= 0 for random u
+  for (let t = 0; t < 5; t++) {
+    const u = new Float64Array(12);
+    for (let i=0;i<12;i++) u[i]=Math.random()*2-1;
+    const Ku = new Float64Array(12);
+    for(let i=0;i<12;i++){let s=0;for(let j=0;j<12;j++)s+=Kl[i][j]*u[j];Ku[i]=s;}
+    let uKu = 0; for(let i=0;i<12;i++) uKu += u[i]*Ku[i];
+    assert(uKu >= -1e-6, `PSD check trial ${t}: u^T K u = ${uKu.toExponential(3)} >= 0`);
+  }
+});
+
+// ============================================================
+// TEST 4: Rotation Matrix Properties
+// ============================================================
+suite('Test 4: Rotation Matrix Properties', (assert, assertClose) => {
+  const testCases = [
+    {name: 'X-aligned', n1:{x:0,y:0,z:0}, n2:{x:5,y:0,z:0}},
+    {name: 'Y-aligned', n1:{x:0,y:0,z:0}, n2:{x:0,y:3,z:0}},
+    {name: 'Z-aligned (vertical)', n1:{x:0,y:0,z:0}, n2:{x:0,y:0,z:4}},
+    {name: '45-deg XY', n1:{x:0,y:0,z:0}, n2:{x:3,y:3,z:0}},
+    {name: '45-deg XZ', n1:{x:0,y:0,z:0}, n2:{x:3,y:0,z:3}},
+    {name: 'Diagonal XYZ', n1:{x:1,y:2,z:3}, n2:{x:4,y:6,z:7}},
+  ];
+
+  for (const tc of testCases) {
+    const R = buildRotationMatrix(tc.n1, tc.n2);
+
+    // Orthogonality: R * R^T = I
+    let orthoErr = 0;
+    for (let i=0;i<3;i++) for(let j=0;j<3;j++) {
+      let s = 0; for(let k=0;k<3;k++) s += R[i][k]*R[j][k];
+      orthoErr = Math.max(orthoErr, Math.abs(s - (i===j?1:0)));
+    }
+    assert(orthoErr < 1e-10, `${tc.name}: orthogonality error = ${orthoErr.toExponential(3)}`);
+
+    // Determinant = 1 (proper rotation, not reflection)
+    const det = R[0][0]*(R[1][1]*R[2][2]-R[1][2]*R[2][1])
+              - R[0][1]*(R[1][0]*R[2][2]-R[1][2]*R[2][0])
+              + R[0][2]*(R[1][0]*R[2][1]-R[1][1]*R[2][0]);
+    assertClose(det, 1.0, 1e-10, `${tc.name}: det(R) = 1`);
+
+    // First row is unit vector along beam
+    const dx = tc.n2.x-tc.n1.x, dy = tc.n2.y-tc.n1.y, dz = tc.n2.z-tc.n1.z;
+    const L = Math.sqrt(dx*dx+dy*dy+dz*dz);
+    assertClose(R[0][0], dx/L, 1e-10, `${tc.name}: R[0][0] = lx`);
+    assertClose(R[0][1], dy/L, 1e-10, `${tc.name}: R[0][1] = ly`);
+    assertClose(R[0][2], dz/L, 1e-10, `${tc.name}: R[0][2] = lz`);
+  }
+});
+
+// ============================================================
+// TEST 5: Global Transformation Properties
+// ============================================================
+suite('Test 5: Global Transformation Properties', (assert, assertClose) => {
+  const L = 4.0, E = 200e6, G = 77e6;
+  const sec = getCHS(219, 8);
+
+  // X-aligned beam: Kg should equal Kl (rotation is identity)
+  const n1 = {x:0,y:0,z:0}, n2 = {x:L,y:0,z:0};
+  const Kl = build3DFrameLocalK(L, E, sec.A, sec.Iy, sec.Iz, G, sec.J);
+  const R3 = buildRotationMatrix(n1, n2);
+  const Kg = transformKtoGlobal(Kl, R3);
+
+  // For X-aligned beam, R should map local x->global x, but local y and z
+  // may swap depending on reference vector. Check Kg is symmetric and
+  // axial stiffness is preserved.
+  let symErr = 0;
+  for (let i=0;i<12;i++) for(let j=0;j<12;j++)
+    symErr = Math.max(symErr, Math.abs(Kg[i][j]-Kg[j][i]));
+  assert(symErr < 1e-4, `X-aligned Kg symmetry: max err = ${symErr.toExponential(3)}`);
+
+  // Axial DOFs (0,6) should be EA/L regardless of rotation
+  assertClose(Kg[0][0], E*sec.A/L, 1e-6, 'X-aligned: Kg[0][0] = EA/L (axial preserved)');
+
+  // Diagonal beam: Kg should still be symmetric
+  const n3 = {x:0,y:0,z:0}, n4 = {x:2,y:2,z:2};
+  const Ld = Math.sqrt(12);
+  const Kl2 = build3DFrameLocalK(Ld, E, sec.A, sec.Iy, sec.Iz, G, sec.J);
+  const R3d = buildRotationMatrix(n3, n4);
+  const Kgd = transformKtoGlobal(Kl2, R3d);
+  let symErr2 = 0;
+  for (let i=0;i<12;i++) for(let j=0;j<12;j++)
+    symErr2 = Math.max(symErr2, Math.abs(Kgd[i][j]-Kgd[j][i]));
+  assert(symErr2 < 1e-4, `Diagonal Kg symmetry: max err = ${symErr2.toExponential(3)}`);
+
+  // Verify T^T * Kl * T manually for diagonal beam
+  const T = Array.from({length:12},()=>new Float64Array(12));
+  for(let b=0;b<4;b++) for(let i=0;i<3;i++) for(let j=0;j<3;j++) T[b*3+i][b*3+j]=R3d[i][j];
+  const tmp = Array.from({length:12},()=>new Float64Array(12));
+  for(let i=0;i<12;i++) for(let j=0;j<12;j++){let s=0;for(let k=0;k<12;k++)s+=Kl2[i][k]*T[k][j];tmp[i][j]=s;}
+  const Kg_manual = Array.from({length:12},()=>new Float64Array(12));
+  for(let i=0;i<12;i++) for(let j=0;j<12;j++){let s=0;for(let k=0;k<12;k++)s+=T[k][i]*tmp[k][j];Kg_manual[i][j]=s;}
+  let tErr = 0;
+  for (let i=0;i<12;i++) for(let j=0;j<12;j++)
+    tErr = Math.max(tErr, Math.abs(Kgd[i][j]-Kg_manual[i][j]));
+  assert(tErr < 1e-6, `Kg matches manual T^T*Kl*T: max err = ${tErr.toExponential(3)}`);
+});
+
+// ============================================================
+// TEST 6: Cantilever Beam (Critical Benchmark)
+// ============================================================
+suite('Test 6: Cantilever Beam', (assert, assertClose) => {
+  // Single element along X-axis, fixed at node 0, point load at node 1
+  // L=5m, CHS 324x10, E=200GPa, P=100kN in Z at free end
+  const L = 5.0;
+  const E = 200e6; // kPa
+  const G = E / 2.6;
+  const sec = getCHS(323.9, 10);
+  const P = 100; // kN
+
+  const nodes = [{id:0, x:0, y:0, z:0}, {id:1, x:L, y:0, z:0}];
+  const elements = [{n1:0, n2:1}];
+  const supports = [{node:0, type:'fixed'}];
+  const forces = [{node:1, fz:P}];
+
+  const result = assembleAndSolve(nodes, elements, supports, forces, E, G, sec);
+
+  assert(result.residual < 1e-6, `Converged: residual = ${result.residual.toExponential(3)}`);
+
+  // Analytical: delta_z = PL^3 / (3EIy)
+  const delta_analytical = P * L*L*L / (3 * E * sec.Iy);
+  const delta_fem = result.displacements[1*6+2]; // node 1, DOF 2 (Uz)
+  assertClose(delta_fem, delta_analytical, 0.02,
+    `Tip deflection Uz: analytical=${(delta_analytical*1000).toFixed(3)}mm`);
+
+  // Analytical: theta_y = PL^2 / (2EIy)  (rotation about Y at free end)
+  const theta_analytical = P * L*L / (2 * E * sec.Iy);
+  const theta_fem = result.displacements[1*6+4]; // node 1, DOF 4 (Ry)
+  // Note: sign depends on convention; check magnitude
+  assertClose(Math.abs(theta_fem), theta_analytical, 0.02,
+    `Tip rotation Ry: analytical=${(theta_analytical*1000).toFixed(3)} mrad`);
+
+  // Fixed end should have zero displacement
+  for (let d = 0; d < 6; d++) {
+    assert(Math.abs(result.displacements[d]) < 1e-10,
+      `Fixed end DOF ${d} = ${result.displacements[d].toExponential(3)} ~ 0`);
+  }
+
+  // Member forces: shear at fixed end should equal P
+  const mf = result.memberForces[0];
+  assertClose(Math.abs(mf.shearZ), P, 0.02,
+    `Shear at fixed end: |V| = ${Math.abs(mf.shearZ).toFixed(2)} kN (expected ${P})`);
+
+  // Moment at fixed end: M = P*L
+  const M_analytical = P * L;
+  const M_fem = Math.max(Math.abs(mf.momentY_1), Math.abs(mf.momentY_2));
+  assertClose(M_fem, M_analytical, 0.02,
+    `Moment at fixed end: M = ${M_fem.toFixed(2)} kNm (expected ${M_analytical})`);
+});
+
+// ============================================================
+// TEST 7: Simply-Supported Beam with Center Load
+// ============================================================
+suite('Test 7: Simply-Supported Beam (Center Load)', (assert, assertClose) => {
+  // 2 elements, L_total=6m, P=50kN downward at center
+  // Nodes: 0 at x=0, 1 at x=3, 2 at x=6
+  // Supports: pinned at 0 and 2
+  const Ltot = 6.0;
+  const E = 200e6;
+  const G = E / 2.6;
+  const sec = getCHS(219, 8);
+  const P = 50;
+
+  const nodes = [
+    {id:0, x:0, y:0, z:0},
+    {id:1, x:Ltot/2, y:0, z:0},
+    {id:2, x:Ltot, y:0, z:0}
+  ];
+  const elements = [{n1:0, n2:1}, {n1:1, n2:2}];
+  const supports = [{node:0, type:'pinned'}, {node:2, type:'pinned'}];
+  const forces = [{node:1, fz:-P}]; // downward
+
+  const result = assembleAndSolve(nodes, elements, supports, forces, E, G, sec);
+
+  assert(result.residual < 1e-6, `Converged: residual = ${result.residual.toExponential(3)}`);
+
+  // Analytical center deflection: delta = PL^3 / (48EI)
+  const delta_analytical = P * Ltot*Ltot*Ltot / (48 * E * sec.Iy);
+  const delta_fem = Math.abs(result.displacements[1*6+2]); // node 1 Uz
+  assertClose(delta_fem, delta_analytical, 0.02,
+    `Center deflection: analytical=${(delta_analytical*1000).toFixed(3)}mm, FEM=${(delta_fem*1000).toFixed(3)}mm`);
+
+  // Support displacements should be ~0 (pinned translations)
+  for (let d = 0; d < 3; d++) {
+    assert(Math.abs(result.displacements[0*6+d]) < 1e-10,
+      `Support 0 translation DOF ${d} ~ 0`);
+    assert(Math.abs(result.displacements[2*6+d]) < 1e-10,
+      `Support 2 translation DOF ${d} ~ 0`);
+  }
+
+  // Equilibrium: sum of applied forces = 0 in total (reactions + load)
+  // Each reaction should be P/2 = 25 kN upward
+  // The code uses penalty method, so restrained DOFs have ~0 displacement
+  // Check via applied force balance
+  let sumFz = 0;
+  for (let i = 0; i < nodes.length; i++) sumFz += result.Fapplied[i*6+2];
+  assertClose(sumFz, -P, 1e-6, `Applied Fz sum = ${sumFz.toFixed(2)} kN (expected ${-P})`);
+
+  // Max moment at center: M = PL/4
+  const M_analytical = P * Ltot / 4;
+  const mf0 = result.memberForces[0];
+  const mf1 = result.memberForces[1];
+  const M_fem = Math.max(
+    Math.abs(mf0.momentY_1), Math.abs(mf0.momentY_2),
+    Math.abs(mf1.momentY_1), Math.abs(mf1.momentY_2)
+  );
+  assertClose(M_fem, M_analytical, 0.02,
+    `Center moment: analytical=${M_analytical.toFixed(2)} kNm, FEM=${M_fem.toFixed(2)} kNm`);
+});
+
+// ============================================================
+// TEST 8: Portal Frame Equilibrium
+// ============================================================
+suite('Test 8: Portal Frame Equilibrium', (assert, assertClose) => {
+  // 3-element portal frame:
+  //   Node 0 (0,0,0) - fixed
+  //   Node 1 (0,0,4) - column top left
+  //   Node 2 (6,0,4) - column top right
+  //   Node 3 (6,0,0) - fixed
+  // Elements: 0-1 (left column), 1-2 (beam), 2-3 (right column)
+  // Lateral load: 20 kN in X at node 1, gravity 30 kN down at node 2
+
+  const E = 200e6, G = E/2.6;
+  const sec = getCHS(323.9, 10);
+
+  const nodes = [
+    {id:0, x:0, y:0, z:0},
+    {id:1, x:0, y:0, z:4},
+    {id:2, x:6, y:0, z:4},
+    {id:3, x:6, y:0, z:0}
+  ];
+  const elements = [{n1:0, n2:1}, {n1:1, n2:2}, {n1:2, n2:3}];
+  const supports = [{node:0, type:'fixed'}, {node:3, type:'fixed'}];
+  const forces = [
+    {node:1, fx:20, fz:0},
+    {node:2, fx:0, fz:-30}
+  ];
+
+  const result = assembleAndSolve(nodes, elements, supports, forces, E, G, sec);
+
+  assert(result.residual < 1e-6, `Converged: residual = ${result.residual.toExponential(3)}`);
+
+  // Global equilibrium check: sum of applied external forces
+  let sumFx = 0, sumFy = 0, sumFz = 0;
+  for (let i = 0; i < nodes.length; i++) {
+    sumFx += result.Fapplied[i*6];
+    sumFy += result.Fapplied[i*6+1];
+    sumFz += result.Fapplied[i*6+2];
+  }
+  assertClose(sumFx, 20, 1e-6, `Applied sum Fx = 20 kN`);
+  assertClose(sumFy, 0, 1e-6, `Applied sum Fy = 0 kN`);
+  assertClose(sumFz, -30, 1e-6, `Applied sum Fz = -30 kN`);
+
+  // Fixed supports should have zero displacement
+  for (let d = 0; d < 6; d++) {
+    assert(Math.abs(result.displacements[0*6+d]) < 1e-10,
+      `Node 0 DOF ${d} = 0 (fixed)`);
+    assert(Math.abs(result.displacements[3*6+d]) < 1e-10,
+      `Node 3 DOF ${d} = 0 (fixed)`);
+  }
+
+  // Free nodes should have non-zero displacement
+  const u1x = result.displacements[1*6]; // node 1 Ux (lateral sway)
+  assert(u1x > 0, `Node 1 sways right (Ux = ${(u1x*1000).toFixed(3)} mm > 0)`);
+
+  const u2z = result.displacements[2*6+2]; // node 2 Uz (vertical)
+  assert(u2z < 0, `Node 2 deflects down (Uz = ${(u2z*1000).toFixed(3)} mm < 0)`);
+
+  // Member forces should be non-zero and reasonable
+  for (let i = 0; i < 3; i++) {
+    const mf = result.memberForces[i];
+    assert(!isNaN(mf.axial), `Element ${i}: axial force is valid number`);
+    assert(!isNaN(mf.shearZ), `Element ${i}: shear force is valid number`);
+  }
+
+  // Axial force in beam (element 1, horizontal) should be compressive or tensile
+  // depending on lateral load direction
+  const beamAxial = result.memberForces[1].axial;
+  assert(Math.abs(beamAxial) > 0.01,
+    `Beam axial force = ${beamAxial.toFixed(2)} kN (non-zero due to frame action)`);
+
+  // Verify K*u = F at free DOFs (true equilibrium check)
+  // Reconstruct K*u and compare to F at free (non-restrained) DOFs
+  // This is the gold-standard equilibrium verification
+  const allNodes = nodes;
+  const nDof = nodes.length * 6;
+  const K = new SparseMatrix(nDof);
+  const nIdx = new Map();
+  nodes.forEach((n, i) => nIdx.set(n.id, i));
+
+  for (const el of elements) {
+    const n1 = nodes[nIdx.get(el.n1)];
+    const n2 = nodes[nIdx.get(el.n2)];
+    const dx = n2.x-n1.x, dy = n2.y-n1.y, dz = n2.z-n1.z;
+    const L = Math.sqrt(dx*dx+dy*dy+dz*dz);
+    const Kl = build3DFrameLocalK(L, E, sec.A, sec.Iy, sec.Iz, G, sec.J);
+    const R3 = buildRotationMatrix(n1, n2);
+    const Kg = transformKtoGlobal(Kl, R3);
+    const si = nIdx.get(el.n1), ei = nIdx.get(el.n2);
+    const dofs = [];
+    for (let d=0;d<6;d++) dofs.push(si*6+d);
+    for (let d=0;d<6;d++) dofs.push(ei*6+d);
+    for (let i=0;i<12;i++) for (let j=0;j<12;j++) K.add(dofs[i], dofs[j], Kg[i][j]);
+  }
+
+  // K*u (without penalty modification)
+  const Ku = new Float64Array(nDof);
+  K.mulVec(result.displacements, Ku);
+
+  // At free DOFs, K*u should equal Fapplied
+  const freeDofs = [];
+  for (let i = 0; i < nDof; i++) {
+    if (!result.restrained.has(i)) freeDofs.push(i);
+  }
+  let maxEquilErr = 0;
+  for (const d of freeDofs) {
+    maxEquilErr = Math.max(maxEquilErr, Math.abs(Ku[d] - result.Fapplied[d]));
+  }
+  assert(maxEquilErr < 0.1,
+    `Free DOF equilibrium: max |K*u - F| = ${maxEquilErr.toExponential(3)} < 0.1 kN`);
+
+  // At restrained DOFs, K*u gives the reaction forces
+  // Sum of reactions should balance applied loads
+  let rxSum = 0, rySum = 0, rzSum = 0;
+  for (const s of supports) {
+    const base = nIdx.get(s.node) * 6;
+    rxSum += Ku[base];
+    rySum += Ku[base+1];
+    rzSum += Ku[base+2];
+  }
+  // Reactions + applied = 0  =>  reactions = -applied
+  assertClose(rxSum + sumFx, 0, 0.5,
+    `X-equilibrium: R_x(${rxSum.toFixed(2)}) + F_x(${sumFx.toFixed(2)}) ~ 0`);
+  assertClose(rzSum + sumFz, 0, 0.5,
+    `Z-equilibrium: R_z(${rzSum.toFixed(2)}) + F_z(${sumFz.toFixed(2)}) ~ 0`);
+});
+
+// ============================================================
+// RENDER RESULTS
+// ============================================================
+const resultsDiv = document.getElementById('results');
+for (const s of suites) {
+  const div = document.createElement('div');
+  div.className = 'suite';
+  const header = document.createElement('div');
+  header.className = `suite-header ${s.fail ? 'fail' : 'pass'}`;
+  header.innerHTML = `<span>${s.name}</span> <span class="badge ${s.fail?'fail':'pass'}">${s.pass}/${s.pass+s.fail} passed</span>`;
+  const body = document.createElement('div');
+  body.className = 'suite-body';
+  for (const t of s.tests) {
+    const p = document.createElement('div');
+    p.className = `test ${t.pass?'pass':'fail'}`;
+    p.textContent = `${t.pass?'PASS':'FAIL'}: ${t.msg}`;
+    body.appendChild(p);
+    if (!t.pass && t.detail) {
+      const d = document.createElement('div');
+      d.className = 'detail';
+      d.textContent = t.detail;
+      body.appendChild(d);
+    }
+  }
+  header.onclick = () => body.style.display = body.style.display === 'none' ? '' : 'none';
+  div.appendChild(header);
+  div.appendChild(body);
+  resultsDiv.appendChild(div);
+}
+
+const summaryDiv = document.getElementById('summary');
+const allPass = totalFail === 0;
+summaryDiv.className = `summary ${allPass ? 'pass' : 'fail'}`;
+summaryDiv.innerHTML = `<strong>${allPass ? 'ALL TESTS PASSED' : 'SOME TESTS FAILED'}</strong> &mdash; ${totalPass} passed, ${totalFail} failed (${suites.length} test suites)`;
+</script>
+</body>
+</html>

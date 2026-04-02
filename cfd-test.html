@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html>
+<head><title>CFD SIMPLE Solver Tests</title>
+<style>
+  body { background:#111; color:#ddd; font-family:monospace; padding:20px; }
+  .pass { color:#4f4; } .fail { color:#f44; } .info { color:#8af; }
+  pre { background:#1a1a2e; padding:10px; border-radius:6px; overflow-x:auto; }
+  h2 { color:#7cacff; margin-top:20px; }
+</style>
+</head>
+<body>
+<h1>CFD SIMPLE Solver — Validation Tests</h1>
+<div id="log"></div>
+<script>
+const log = document.getElementById('log');
+function print(msg, cls='') { const d=document.createElement('div'); d.className=cls; d.textContent=msg; log.appendChild(d); }
+function pass(msg) { print('  PASS: '+msg, 'pass'); }
+function fail(msg) { print('  FAIL: '+msg, 'fail'); }
+function info(msg) { print('  '+msg, 'info'); }
+
+// Extract the worker code from diagrid-viewer.html dynamically is complex.
+// Instead, we inline a minimal version of the solver for testing.
+// The test creates a Worker with the same code structure as createCFDWorkerCode().
+
+async function runSolver(config) {
+  return new Promise((resolve, reject) => {
+    const code = `
+'use strict';
+self.onmessage = function(e) {
+  const { nx, ny, nz, dx, dy, dz, cellType, rho, mu, Uin, dirAxis, dirSign, k_in, eps_in, maxIter, tol } = e.data;
+  const N = nx * ny * nz;
+  const idx = (i, j, k) => i + j * nx + k * nx * ny;
+  const Cmu = 0.09, C1e = 1.44, C2e = 1.92, sigmaK = 1.0, sigmaE = 1.3;
+  const u = new Float64Array(N), v = new Float64Array(N), w = new Float64Array(N);
+  const p = new Float64Array(N);
+  const k = new Float64Array(N), eps = new Float64Array(N), nut = new Float64Array(N);
+  const pp = new Float64Array(N);
+  const aP_u = new Float64Array(N), aP_v = new Float64Array(N), aP_w = new Float64Array(N);
+  const alphaU = 0.7, alphaP = 0.3, alphaK = 0.7, alphaE = 0.7;
+  for (let ii = 0; ii < N; ii++) {
+    if (cellType[ii] !== 1) {
+      if (dirAxis === 0) u[ii] = Uin * dirSign; else v[ii] = Uin * dirSign;
+      k[ii] = k_in; eps[ii] = eps_in; nut[ii] = Cmu * k_in * k_in / (eps_in + 1e-30);
+    }
+  }
+  const Ax = dy * dz, Ay = dx * dz, Az = dx * dy, vol = dx * dy * dz;
+
+  function applyBC(field, bcType) {
+    for (let j = 0; j < ny; j++) for (let kk = 0; kk < nz; kk++) {
+      const iIn = dirAxis === 0 ? (dirSign > 0 ? 0 : nx - 1) : 0;
+      const iOut = dirAxis === 0 ? (dirSign > 0 ? nx - 1 : 0) : nx - 1;
+      if (bcType === 'vel_u') { field[idx(iIn, j, kk)] = dirAxis === 0 ? Uin * dirSign : 0; field[idx(iOut, j, kk)] = field[idx(Math.max(0,Math.min(nx-1,iOut-(dirSign>0?1:-1))), j, kk)] || 0; }
+      else if (bcType === 'vel_v') { field[idx(iIn, j, kk)] = dirAxis === 1 ? Uin * dirSign : 0; field[idx(iOut, j, kk)] = field[idx(Math.max(0,Math.min(nx-1,iOut-1)), j, kk)]; }
+      else if (bcType === 'vel_w') { field[idx(iIn, j, kk)] = 0; field[idx(iOut, j, kk)] = field[idx(Math.max(0,Math.min(nx-1,iOut-1)), j, kk)]; }
+      else if (bcType === 'p') { field[idx(iOut, j, kk)] = 0; field[idx(iIn, j, kk)] = field[idx(iIn + (dirSign > 0 ? 1 : -1), j, kk)] || 0; }
+      else if (bcType === 'k') { field[idx(iIn, j, kk)] = k_in; field[idx(iOut, j, kk)] = field[idx(Math.max(0,Math.min(nx-1,iOut-1)), j, kk)]; }
+      else if (bcType === 'eps') { field[idx(iIn, j, kk)] = eps_in; field[idx(iOut, j, kk)] = field[idx(Math.max(0,Math.min(nx-1,iOut-1)), j, kk)]; }
+    }
+    for (let i = 0; i < nx; i++) for (let kk = 0; kk < nz; kk++) {
+      if (bcType === 'vel_v') { field[idx(i,0,kk)] = 0; field[idx(i,ny-1,kk)] = 0; }
+      else { field[idx(i,0,kk)] = field[idx(i,1,kk)]; field[idx(i,ny-1,kk)] = field[idx(i,ny-2,kk)]; }
+    }
+    for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) {
+      if (bcType.startsWith('vel')) { field[idx(i,j,0)] = 0; } else { field[idx(i,j,0)] = field[idx(i,j,1)]; }
+      if (bcType === 'vel_w') field[idx(i,j,nz-1)] = 0; else field[idx(i,j,nz-1)] = field[idx(i,j,nz-2)];
+    }
+    for (let ii = 0; ii < N; ii++) { if (cellType[ii] === 1) field[ii] = 0; }
+  }
+
+  function solveGS(aP,aE,aW,aN,aS,aT,aB,src,phi,nSweeps) {
+    for (let sw=0;sw<nSweeps;sw++) for (let kk=1;kk<nz-1;kk++) for (let j=1;j<ny-1;j++) for (let i=1;i<nx-1;i++) {
+      const ii=idx(i,j,kk); if(cellType[ii]===1)continue; if(Math.abs(aP[ii])<1e-30)continue;
+      phi[ii]=(src[ii]+aE[ii]*phi[idx(i+1,j,kk)]+aW[ii]*phi[idx(i-1,j,kk)]+aN[ii]*phi[idx(i,j+1,kk)]+aS[ii]*phi[idx(i,j-1,kk)]+aT[ii]*phi[idx(i,j,kk+1)]+aB[ii]*phi[idx(i,j,kk-1)])/aP[ii];
+    }
+  }
+
+  const aP=new Float64Array(N),aE=new Float64Array(N),aW=new Float64Array(N);
+  const aN=new Float64Array(N),aS=new Float64Array(N),aT=new Float64Array(N),aB=new Float64Array(N);
+  const src=new Float64Array(N);
+
+  function assembleMomentum(vel,velComp,apStore) {
+    aP.fill(0);aE.fill(0);aW.fill(0);aN.fill(0);aS.fill(0);aT.fill(0);aB.fill(0);src.fill(0);
+    for(let kk=1;kk<nz-1;kk++) for(let j=1;j<ny-1;j++) for(let i=1;i<nx-1;i++) {
+      const ii=idx(i,j,kk);
+      if(cellType[ii]===1){aP[ii]=1e30;src[ii]=0;continue;}
+      const muEff=mu+nut[ii]*rho;
+      const ibmPenalty=(cellType[ii]===2)?1e6*muEff/vol:0;
+      const De=muEff*Ax/dx,Dw=De,Dn=muEff*Ay/dy,Ds=Dn,Dt=muEff*Az/dz,Db=Dt;
+      const Fe=rho*0.5*(u[ii]+u[idx(i+1,j,kk)])*Ax, Fw=rho*0.5*(u[ii]+u[idx(i-1,j,kk)])*Ax;
+      const Fn=rho*0.5*(v[ii]+v[idx(i,j+1,kk)])*Ay, Fs=rho*0.5*(v[ii]+v[idx(i,j-1,kk)])*Ay;
+      const Ft=rho*0.5*(w[ii]+w[idx(i,j,kk+1)])*Az, Fb=rho*0.5*(w[ii]+w[idx(i,j,kk-1)])*Az;
+      aE[ii]=De+Math.max(-Fe,0); aW[ii]=Dw+Math.max(Fw,0);
+      aN[ii]=Dn+Math.max(-Fn,0); aS[ii]=Ds+Math.max(Fs,0);
+      aT[ii]=Dt+Math.max(-Ft,0); aB[ii]=Db+Math.max(Fb,0);
+      aP[ii]=aE[ii]+aW[ii]+aN[ii]+aS[ii]+aT[ii]+aB[ii]+(Fe-Fw)+(Fn-Fs)+(Ft-Fb)+ibmPenalty;
+      if(velComp===0) src[ii]=(p[idx(i-1,j,kk)]-p[idx(i+1,j,kk)])*0.5*Ax;
+      else if(velComp===1) src[ii]=(p[idx(i,j-1,kk)]-p[idx(i,j+1,kk)])*0.5*Ay;
+      else src[ii]=(p[idx(i,j,kk-1)]-p[idx(i,j,kk+1)])*0.5*Az;
+      aP[ii]/=alphaU; src[ii]+=(1-alphaU)*aP[ii]*vel[ii];
+      apStore[ii]=aP[ii];
+    }
+    solveGS(aP,aE,aW,aN,aS,aT,aB,src,vel,15);
+  }
+
+  function assemblePressureCorrection() {
+    aP.fill(0);aE.fill(0);aW.fill(0);aN.fill(0);aS.fill(0);aT.fill(0);aB.fill(0);src.fill(0);pp.fill(0);
+    for(let kk=1;kk<nz-1;kk++) for(let j=1;j<ny-1;j++) for(let i=1;i<nx-1;i++) {
+      const ii=idx(i,j,kk);
+      if(cellType[ii]===1){aP[ii]=1e30;continue;}
+      const de=(aP_u[idx(i+1,j,kk)]>1e-20)?Ax/(dx*aP_u[idx(i+1,j,kk)]):0;
+      const dw=(aP_u[idx(i-1,j,kk)]>1e-20)?Ax/(dx*aP_u[idx(i-1,j,kk)]):0;
+      const dn=(aP_v[idx(i,j+1,kk)]>1e-20)?Ay/(dy*aP_v[idx(i,j+1,kk)]):0;
+      const ds=(aP_v[idx(i,j-1,kk)]>1e-20)?Ay/(dy*aP_v[idx(i,j-1,kk)]):0;
+      const dt=(aP_w[idx(i,j,kk+1)]>1e-20)?Az/(dz*aP_w[idx(i,j,kk+1)]):0;
+      const db=(aP_w[idx(i,j,kk-1)]>1e-20)?Az/(dz*aP_w[idx(i,j,kk-1)]):0;
+      aE[ii]=rho*de*Ax; aW[ii]=rho*dw*Ax; aN[ii]=rho*dn*Ay; aS[ii]=rho*ds*Ay; aT[ii]=rho*dt*Az; aB[ii]=rho*db*Az;
+      aP[ii]=aE[ii]+aW[ii]+aN[ii]+aS[ii]+aT[ii]+aB[ii]; if(aP[ii]<1e-20)aP[ii]=1e-20;
+      const ue=0.5*(u[ii]+u[idx(i+1,j,kk)]),uw=0.5*(u[ii]+u[idx(i-1,j,kk)]);
+      const vn=0.5*(v[ii]+v[idx(i,j+1,kk)]),vs=0.5*(v[ii]+v[idx(i,j-1,kk)]);
+      const wt=0.5*(w[ii]+w[idx(i,j,kk+1)]),wb=0.5*(w[ii]+w[idx(i,j,kk-1)]);
+      src[ii]=rho*((uw-ue)*Ax+(vs-vn)*Ay+(wb-wt)*Az);
+    }
+    aP[idx(1,1,1)]=1e30;
+    solveGS(aP,aE,aW,aN,aS,aT,aB,src,pp,50);
+  }
+
+  function correctVelocityPressure() {
+    for(let kk=1;kk<nz-1;kk++) for(let j=1;j<ny-1;j++) for(let i=1;i<nx-1;i++) {
+      const ii=idx(i,j,kk); if(cellType[ii]===1)continue;
+      if(aP_u[ii]>1e-20) u[ii]+=(pp[idx(i-1,j,kk)]-pp[idx(i+1,j,kk)])*0.5*Ax/(dx*aP_u[ii]);
+      if(aP_v[ii]>1e-20) v[ii]+=(pp[idx(i,j-1,kk)]-pp[idx(i,j+1,kk)])*0.5*Ay/(dy*aP_v[ii]);
+      if(aP_w[ii]>1e-20) w[ii]+=(pp[idx(i,j,kk-1)]-pp[idx(i,j,kk+1)])*0.5*Az/(dz*aP_w[ii]);
+      p[ii]+=alphaP*pp[ii];
+    }
+  }
+
+  // Simplified: skip turbulence for benchmark tests (laminar)
+  for (let iter = 0; iter < maxIter; iter++) {
+    assembleMomentum(u,0,aP_u); applyBC(u,'vel_u');
+    assembleMomentum(v,1,aP_v); applyBC(v,'vel_v');
+    assembleMomentum(w,2,aP_w); applyBC(w,'vel_w');
+    assemblePressureCorrection(); correctVelocityPressure();
+    applyBC(u,'vel_u'); applyBC(v,'vel_v'); applyBC(w,'vel_w'); applyBC(p,'p');
+    if (iter % 10 === 0) self.postMessage({type:'progress',iteration:iter,maxIter});
+  }
+  self.postMessage({type:'complete',u,v,w,p,iteration:maxIter,cellType},
+    [u.buffer,v.buffer,w.buffer,p.buffer]);
+};`;
+    const blob = new Blob([code], {type:'application/javascript'});
+    const url = URL.createObjectURL(blob);
+    const worker = new Worker(url);
+    URL.revokeObjectURL(url);
+    worker.onmessage = e => { if (e.data.type === 'complete') resolve(e.data); };
+    worker.onerror = e => reject(e.message);
+    worker.postMessage(config);
+  });
+}
+
+async function test1_emptyChannel() {
+  print('\n--- Test 1: Empty Channel Flow ---');
+  const nx=20,ny=10,nz=10;
+  const N=nx*ny*nz;
+  const cellType = new Uint8Array(N); // all 0 = fluid
+  const Uin=10, dx=1, dy=1, dz=1;
+  const rho=1.225, mu=1.81e-5;
+  const k_in=0.0375, eps_in=0.0036;
+
+  info('Grid: '+nx+'x'+ny+'x'+nz+', Uin='+Uin+' m/s, 100 iterations');
+  const t0 = performance.now();
+  const res = await runSolver({nx,ny,nz,dx,dy,dz,cellType,rho,mu,Uin,dirAxis:0,dirSign:1,k_in,eps_in,maxIter:100,tol:1e-6});
+  info('Solved in '+ ((performance.now()-t0)/1000).toFixed(1) +'s');
+
+  // Check u ~ Uin in interior
+  let maxUerr=0, maxV=0, maxW=0;
+  const idx=(i,j,k)=>i+j*nx+k*nx*ny;
+  for(let kk=2;kk<nz-2;kk++) for(let j=2;j<ny-2;j++) for(let i=2;i<nx-2;i++) {
+    const ii=idx(i,j,kk);
+    maxUerr=Math.max(maxUerr,Math.abs(res.u[ii]-Uin));
+    maxV=Math.max(maxV,Math.abs(res.v[ii]));
+    maxW=Math.max(maxW,Math.abs(res.w[ii]));
+  }
+  info('max|u-Uin|='+maxUerr.toFixed(4)+', max|v|='+maxV.toFixed(4)+', max|w|='+maxW.toFixed(4));
+  if(maxUerr<1.0) pass('u velocity within 1 m/s of inlet ('+maxUerr.toFixed(3)+')'); else fail('u deviated by '+maxUerr.toFixed(3));
+  if(maxV<1.0) pass('v crossflow < 1 m/s ('+maxV.toFixed(3)+')'); else fail('v crossflow = '+maxV.toFixed(3));
+  if(maxW<1.0) pass('w vertical < 1 m/s ('+maxW.toFixed(3)+')'); else fail('w vertical = '+maxW.toFixed(3));
+}
+
+async function test2_blockFlow() {
+  print('\n--- Test 2: Flow Around Block ---');
+  const nx=30,ny=15,nz=15;
+  const N=nx*ny*nz;
+  const cellType = new Uint8Array(N);
+  const idx=(i,j,k)=>i+j*nx+k*nx*ny;
+
+  // Place a solid block at center
+  for(let kk=5;kk<10;kk++) for(let j=5;j<10;j++) for(let i=12;i<18;i++) {
+    cellType[idx(i,j,kk)] = 1;
+  }
+  // Interface layer around block
+  for(let kk=4;kk<11;kk++) for(let j=4;j<11;j++) for(let i=11;i<19;i++) {
+    if(cellType[idx(i,j,kk)]===0) cellType[idx(i,j,kk)] = 2;
+  }
+
+  let solidCount=0,interfaceCount=0;
+  for(let ii=0;ii<N;ii++){if(cellType[ii]===1)solidCount++;if(cellType[ii]===2)interfaceCount++;}
+  info('Solid cells: '+solidCount+', Interface: '+interfaceCount+', Fluid: '+(N-solidCount-interfaceCount));
+
+  const Uin=10, dx=1, dy=1, dz=1;
+  const rho=1.225, mu=1.81e-3; // higher viscosity for stability
+  const k_in=0.0375, eps_in=0.0036;
+
+  info('Grid: '+nx+'x'+ny+'x'+nz+', block at center, 150 iterations');
+  const t0 = performance.now();
+  const res = await runSolver({nx,ny,nz,dx,dy,dz,cellType,rho,mu,Uin,dirAxis:0,dirSign:1,k_in,eps_in,maxIter:150,tol:1e-6});
+  info('Solved in '+ ((performance.now()-t0)/1000).toFixed(1) +'s');
+
+  // Check: u=0 inside block
+  let maxUsolid=0;
+  for(let kk=5;kk<10;kk++) for(let j=5;j<10;j++) for(let i=12;i<18;i++) {
+    maxUsolid=Math.max(maxUsolid,Math.abs(res.u[idx(i,j,kk)]));
+  }
+  if(maxUsolid<0.01) pass('u=0 inside solid (max='+maxUsolid.toExponential(2)+')'); else fail('u inside solid = '+maxUsolid.toFixed(3));
+
+  // Check: stagnation pressure on front face (i=11, upstream of block)
+  let pFront=0, pBack=0, pFree=0, countF=0, countB=0, countFr=0;
+  for(let j=5;j<10;j++) for(let kk=5;kk<10;kk++) {
+    pFront+=res.p[idx(11,j,kk)]; countF++;
+    pBack+=res.p[idx(18,j,kk)]; countB++;
+    pFree+=res.p[idx(2,j,kk)]; countFr++;
+  }
+  pFront/=countF; pBack/=countB; pFree/=countFr;
+  info('p_front='+pFront.toFixed(2)+', p_back='+pBack.toFixed(2)+', p_free='+pFree.toFixed(2));
+  if(pFront>pFree) pass('Stagnation pressure > freestream'); else fail('Front pressure not elevated');
+  if(pBack<pFront) pass('Wake pressure < front pressure'); else fail('Wake pressure not lower than front');
+}
+
+async function test3_massConservation() {
+  print('\n--- Test 3: Mass Conservation ---');
+  const nx=20,ny=10,nz=10;
+  const N=nx*ny*nz;
+  const cellType = new Uint8Array(N);
+  const idx=(i,j,k)=>i+j*nx+k*nx*ny;
+  const Uin=10, dx=1, dy=1, dz=1;
+  const rho=1.225, mu=1.81e-5;
+  const k_in=0.0375, eps_in=0.0036;
+  const Ax=dy*dz;
+
+  info('Grid: '+nx+'x'+ny+'x'+nz+', checking inlet vs outlet mass flux');
+  const res = await runSolver({nx,ny,nz,dx,dy,dz,cellType,rho,mu,Uin,dirAxis:0,dirSign:1,k_in,eps_in,maxIter:100,tol:1e-6});
+
+  let inletFlux=0, outletFlux=0;
+  for(let j=1;j<ny-1;j++) for(let kk=1;kk<nz-1;kk++) {
+    inletFlux += rho * res.u[idx(1,j,kk)] * Ax;
+    outletFlux += rho * res.u[idx(nx-2,j,kk)] * Ax;
+  }
+  const error = Math.abs(inletFlux - outletFlux) / (Math.abs(inletFlux) + 1e-30);
+  info('Inlet flux='+inletFlux.toFixed(2)+' kg/s, Outlet flux='+outletFlux.toFixed(2)+' kg/s');
+  info('Relative error='+( error*100).toFixed(2)+'%');
+  if(error<0.05) pass('Mass conservation within 5% ('+( error*100).toFixed(2)+'%)'); else fail('Mass imbalance = '+( error*100).toFixed(2)+'%');
+}
+
+(async () => {
+  print('Starting CFD solver validation...\n');
+  try {
+    await test1_emptyChannel();
+    await test2_blockFlow();
+    await test3_massConservation();
+  } catch(e) { fail('Test crashed: '+e); }
+  print('\n=== Tests Complete ===');
+})();
+</script>
+</body>
+</html>
