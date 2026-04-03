@@ -364,6 +364,7 @@ window.setMode = function(mode) {
     const el = document.getElementById(pid);
     if (el) el.classList.toggle('hidden', mode !== m);
   }
+  if (mode !== 'cfd' && typeof hideCFDLegend === 'function') hideCFDLegend();
   if (mode === 'cfd') updateCFDPrecheck();
   if (mode === 'analysis') updateAnalysisPrecheck();
   if (mode === 'cables') initCablesPanel();
@@ -1507,15 +1508,17 @@ window.clearResults = function() {
 let tableData = [];
 let tableColumns = [];
 
-window.showResultsTable = function() {
-  if (!femResults) return;
+window.showResultsTable = function(defaultTab) {
+  if (!femResults && !cfdResults) return;
   document.getElementById('table-overlay').classList.add('open');
   document.getElementById('table-overlay').style.display = 'flex';
   document.getElementById('canvas-container').classList.add('table-open');
   resizeRenderer();
-  currentTableTab = 'nodes';
-  document.querySelectorAll('.tab-btn').forEach((b,i) => b.classList.toggle('active', i===0));
-  buildTable('nodes');
+  const tab = defaultTab || (femResults ? 'nodes' : 'cfd');
+  currentTableTab = tab;
+  const tabBtns = document.querySelectorAll('.tab-btn');
+  tabBtns.forEach(b => b.classList.toggle('active', b.textContent.toLowerCase() === tab || (tab === 'nodes' && b.textContent === 'Nodes')));
+  buildTable(tab);
 };
 
 window.showTab = function(tab, btn) {
@@ -1536,9 +1539,10 @@ window.closeTable = function() {
 function buildTable(tab) {
   const thead = document.querySelector('#result-table thead');
   const tbody = document.querySelector('#result-table tbody');
-  const u = femResults.displacements;
+  const u = femResults ? femResults.displacements : null;
 
   if (tab === 'nodes') {
+    if (!u) { tableColumns = ['No FEM results']; tableData = []; renderTable(); return; }
     tableColumns = ['ID','X','Y','Z','Ux (mm)','Uy (mm)','Uz (mm)','Rx (rad)','Ry (rad)','Rz (rad)','|U| (mm)','Support'];
     tableData = nodes.map((n,i) => {
       const ux=u[i*6]*1000, uy=u[i*6+1]*1000, uz=u[i*6+2]*1000;
@@ -1547,7 +1551,25 @@ function buildTable(tab) {
       const sup = supports.has(n.id) ? supports.get(n.id).type : '-';
       return [n.id, n.x, n.y, n.z, ux, uy, uz, rx, ry, rz, mag, sup];
     });
+  } else if (tab === 'cfd') {
+    if (!cfdResults || !cfdGrid) { tableColumns = ['No CFD results']; tableData = []; renderTable(); return; }
+    tableColumns = ['Node ID','X','Y','Z','u (m/s)','v (m/s)','w (m/s)','|V| (m/s)','P (Pa)','Cp','Fx (kN)','Fy (kN)','Fz (kN)'];
+    const Uin = parseFloat(document.getElementById('cfd-velocity').value) || 10;
+    const rhoAir = parseFloat(document.getElementById('cfd-rho').value) || 1.225;
+    const dynP = 0.5 * rhoAir * Uin * Uin;
+    tableData = nodes.map(n => {
+      const uu = trilinearInterp(cfdResults.u, n.x, n.y, n.z);
+      const vv = trilinearInterp(cfdResults.v, n.x, n.y, n.z);
+      const ww = trilinearInterp(cfdResults.w, n.x, n.y, n.z);
+      const vm = Math.sqrt(uu*uu + vv*vv + ww*ww);
+      const pp = trilinearInterp(cfdResults.p, n.x, n.y, n.z);
+      const cp = dynP > 0 ? pp / dynP : 0;
+      const pl = pointLoads.get(n.id);
+      const fx = pl ? pl.fx : 0, fy = pl ? pl.fy : 0, fz = pl ? pl.fz : 0;
+      return [n.id, n.x, n.y, n.z, uu, vv, ww, vm, pp, cp, fx, fy, fz];
+    });
   } else {
+    if (!femResults) { tableColumns = ['No FEM results']; tableData = []; renderTable(); return; }
     tableColumns = ['ID','Start','End','Length (m)','Axial (kN)','ShearY (kN)','ShearZ (kN)','MomentY (kNm)','MomentZ (kNm)','Torsion (kNm)','|M| (kNm)'];
     tableData = beams.map((b,i) => {
       if(!b || !femResults.memberForces[i]) return null;
@@ -1634,6 +1656,38 @@ renderer.domElement.addEventListener('mousemove', e => {
       ttBody.innerHTML=h;
     }
     tooltip.style.display='block';tooltip.style.left=(e.clientX+14)+'px';tooltip.style.top=(e.clientY+14)+'px';
+  } else if (currentMode === 'cfd' && cfdResults) {
+    // CFD hover: raycast against CFD meshes
+    const cfdMeshes = cfdGroup.children.filter(c => c.isMesh && c.userData.type === 'cfd-pressure');
+    const cfdHits = raycaster.intersectObjects(cfdMeshes);
+    if (cfdHits.length > 0) {
+      const hit = cfdHits[0];
+      const faceIdx = Math.floor(hit.faceIndex);
+      const ud = hit.object.userData;
+      if (ud.pressures && faceIdx < ud.pressures.length) {
+        const pVal = ud.pressures[faceIdx];
+        const Uin = parseFloat(document.getElementById('cfd-velocity').value) || 10;
+        const rhoAir = parseFloat(document.getElementById('cfd-rho').value) || 1.225;
+        const dynP = 0.5 * rhoAir * Uin * Uin;
+        const cp = dynP > 0 ? (pVal / dynP).toFixed(3) : '--';
+        const tri = ud.triangles[faceIdx];
+        const mx = (tri.a.x + tri.b.x + tri.c.x) / 3;
+        const mz = (tri.a.z + tri.b.z + tri.c.z) / 3;
+        const ttTitle = document.getElementById('tt-title'), ttBody = document.getElementById('tt-body');
+        ttTitle.textContent = 'Surface Pressure';
+        ttBody.innerHTML =
+          `<div class="tt-row">P = ${pVal.toFixed(1)} Pa</div>` +
+          `<div class="tt-row">Cp = ${cp}</div>` +
+          `<div class="tt-row">Area = ${(tri.area).toFixed(4)} m\u00B2</div>` +
+          `<div class="tt-row">Pos: (${mx.toFixed(1)}, ${mz.toFixed(1)})</div>`;
+        tooltip.style.display = 'block';
+        tooltip.style.left = (e.clientX + 14) + 'px';
+        tooltip.style.top = (e.clientY + 14) + 'px';
+      }
+    } else {
+      // Check if hovering in the flow field — interpolate
+      tooltip.style.display = 'none';
+    }
   } else tooltip.style.display='none';
 });
 
@@ -2423,7 +2477,7 @@ self.onmessage = function(e) {
   const aP_u = new Float64Array(N), aP_v = new Float64Array(N), aP_w = new Float64Array(N);
 
   // Under-relaxation
-  const alphaU = 0.7, alphaP = 0.3, alphaK = 0.7, alphaE = 0.7;
+  const alphaU = 0.5, alphaP = 0.2, alphaK = 0.5, alphaE = 0.5;
 
   // Initialize fields
   for (let ii = 0; ii < N; ii++) {
@@ -2485,12 +2539,14 @@ self.onmessage = function(e) {
         const ii = idx(i, j, kk);
         if (cellType[ii] === 1) continue;
         const ap = aP[ii];
-        if (Math.abs(ap) < 1e-30) continue;
-        phi[ii] = (src[ii]
+        if (ap < 1e-30) continue;
+        let val = (src[ii]
           + aE[ii] * phi[idx(i + 1, j, kk)] + aW[ii] * phi[idx(i - 1, j, kk)]
           + aN[ii] * phi[idx(i, j + 1, kk)] + aS[ii] * phi[idx(i, j - 1, kk)]
           + aT[ii] * phi[idx(i, j, kk + 1)] + aB[ii] * phi[idx(i, j, kk - 1)]
         ) / ap;
+        if (!isFinite(val)) val = 0;
+        phi[ii] = val;
       }
     }
   }
@@ -2528,7 +2584,8 @@ self.onmessage = function(e) {
       aT[ii] = Dt + Math.max(-Ft, 0);
       aB[ii] = Db + Math.max(Fb, 0);
 
-      aP[ii] = aE[ii] + aW[ii] + aN[ii] + aS[ii] + aT[ii] + aB[ii] + (Fe - Fw) + (Fn - Fs) + (Ft - Fb);
+      aP[ii] = aE[ii] + aW[ii] + aN[ii] + aS[ii] + aT[ii] + aB[ii];
+      if (aP[ii] < 1e-10) aP[ii] = 1e-10;
 
       // Pressure gradient source
       if (velComp === 0) src[ii] = (p[idx(i - 1, j, kk)] - p[idx(i + 1, j, kk)]) * 0.5 * Ax;
@@ -2578,17 +2635,21 @@ self.onmessage = function(e) {
     }
     // Reference pressure
     aP[idx(1, 1, 1)] = 1e30;
-    solveGS(aP, aE, aW, aN, aS, aT, aB, src, pp, 50);
+    solveGS(aP, aE, aW, aN, aS, aT, aB, src, pp, 100);
   }
 
   function correctVelocityPressure() {
+    // Limit pressure correction magnitude to prevent runaway
+    const pRef = 0.5 * rho * Uin * Uin;  // dynamic pressure as reference scale
+    const ppMax = pRef * 10;  // allow up to 10x dynamic pressure correction
     for (let kk = 1; kk < nz - 1; kk++) for (let j = 1; j < ny - 1; j++) for (let i = 1; i < nx - 1; i++) {
       const ii = idx(i, j, kk);
       if (cellType[ii] === 1) continue;
+      const ppClamped = Math.max(-ppMax, Math.min(ppMax, pp[ii]));
       if (aP_u[ii] > 1e-20) u[ii] += (pp[idx(i - 1, j, kk)] - pp[idx(i + 1, j, kk)]) * 0.5 * Ax / (dx * aP_u[ii]);
       if (aP_v[ii] > 1e-20) v[ii] += (pp[idx(i, j - 1, kk)] - pp[idx(i, j + 1, kk)]) * 0.5 * Ay / (dy * aP_v[ii]);
       if (aP_w[ii] > 1e-20) w[ii] += (pp[idx(i, j, kk - 1)] - pp[idx(i, j, kk + 1)]) * 0.5 * Az / (dz * aP_w[ii]);
-      p[ii] += alphaP * pp[ii];
+      p[ii] += alphaP * ppClamped;
     }
     // Extrapolate pressure to solid/interface cells from nearest fluid neighbor
     for (let kk = 1; kk < nz - 1; kk++) for (let j = 1; j < ny - 1; j++) for (let i = 1; i < nx - 1; i++) {
@@ -2723,6 +2784,16 @@ self.onmessage = function(e) {
 
     assemblePressureCorrection();
     correctVelocityPressure();
+
+    // Velocity clamping to prevent runaway
+    const uClamp = Math.abs(Uin) * 5 + 1;
+    for (let ii = 0; ii < N; ii++) {
+      if (cellType[ii] === 1) continue;
+      u[ii] = Math.max(-uClamp, Math.min(uClamp, u[ii]));
+      v[ii] = Math.max(-uClamp, Math.min(uClamp, v[ii]));
+      w[ii] = Math.max(-uClamp, Math.min(uClamp, w[ii]));
+    }
+
     applyBC(u, 'vel_u'); applyBC(v, 'vel_v'); applyBC(w, 'vel_w');
     applyBC(p, 'p');
 
@@ -2730,6 +2801,14 @@ self.onmessage = function(e) {
     applyBC(k, 'k'); applyBC(eps, 'eps');
 
     const residuals = computeResiduals();
+
+    // NaN early-stop
+    if (residuals.some(r => !isFinite(r))) {
+      self.postMessage({ type: 'complete', iteration: iter, residuals, u, v, w, p, k, eps, nut,
+        error: 'Solver diverged (NaN detected)' },
+        [u.buffer, v.buffer, w.buffer, p.buffer, k.buffer, eps.buffer, nut.buffer]);
+      return;
+    }
 
     if (iter % 5 === 0) {
       self.postMessage({ type: 'progress', iteration: iter, maxIter, residuals });
@@ -2814,12 +2893,14 @@ window.runCFD = async function() {
         k: msg.k, eps: msg.eps, nut: msg.nut,
         grid: cfdGrid, iterations: msg.iteration
       };
+      window._cfdDebug = cfdResults; // debug access to CFD results
       cfdRunning = false;
       cfdWorker = null;
       document.getElementById('btn-cancel-cfd').style.display = 'none';
       document.getElementById('cfd-results').style.display = '';
       document.getElementById('cfd-solve-info').textContent =
         `Converged in ${msg.iteration} iterations. Grid: ${cfdGrid.nx}×${cfdGrid.ny}×${cfdGrid.nz}`;
+      updateCFDStats();
       setTimeout(() => { overlay.style.display = 'none'; showCFDVectors(); }, 500);
     }
   };
@@ -2880,6 +2961,95 @@ function trilinearInterp(field, x, y, z) {
   );
 }
 
+// CFD legend state for tooltip lookups
+let cfdLegendState = null; // {label, unit, minVal, maxVal, field}
+
+function updateCFDLegend(label, minVal, maxVal, unit) {
+  const canvas = document.getElementById('cfd-legend-canvas');
+  if (!canvas) return;
+  canvas.style.display = 'block';
+  const dpr = window.devicePixelRatio || 1;
+  const w = 60, h = 240;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+
+  const barX = 8, barW = 16, barTop = 28, barBot = h - 16;
+  const barH = barBot - barTop;
+
+  // Draw gradient bar
+  for (let y = 0; y < barH; y++) {
+    const t = 1 - y / barH; // top=1 (max), bottom=0 (min)
+    const c = jetColormap(t);
+    ctx.fillStyle = `rgb(${Math.round(c.r*255)},${Math.round(c.g*255)},${Math.round(c.b*255)})`;
+    ctx.fillRect(barX, barTop + y, barW, 1);
+  }
+  // Border
+  ctx.strokeStyle = 'rgba(200,220,255,0.3)';
+  ctx.strokeRect(barX, barTop, barW, barH);
+
+  // Tick labels
+  ctx.fillStyle = '#bcd';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'left';
+  const ticks = 5;
+  for (let i = 0; i <= ticks; i++) {
+    const t = i / ticks;
+    const val = minVal + (maxVal - minVal) * t;
+    const y = barBot - t * barH;
+    ctx.fillRect(barX + barW, y - 0.5, 3, 1); // tick mark
+    let txt;
+    if (Math.abs(val) >= 1000) txt = val.toExponential(1);
+    else if (Math.abs(val) >= 1) txt = val.toFixed(1);
+    else txt = val.toFixed(3);
+    ctx.fillText(txt, barX + barW + 5, y + 3);
+  }
+
+  // Title
+  ctx.fillStyle = '#8ab';
+  ctx.font = 'bold 9px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(label, w / 2, 10);
+  ctx.font = '8px sans-serif';
+  ctx.fillText(unit, w / 2, 21);
+
+  cfdLegendState = { label, unit, minVal, maxVal };
+}
+
+function hideCFDLegend() {
+  const canvas = document.getElementById('cfd-legend-canvas');
+  if (canvas) canvas.style.display = 'none';
+  cfdLegendState = null;
+}
+
+function updateCFDStats() {
+  if (!cfdResults || !cfdGrid) return;
+  const g = cfdGrid, r = cfdResults;
+  let maxV = 0, minP = Infinity, maxP = -Infinity;
+  const N = g.nx * g.ny * g.nz;
+  for (let i = 0; i < N; i++) {
+    if (g.cellType[i] === 1) continue;
+    const vm = Math.sqrt(r.u[i]**2 + r.v[i]**2 + r.w[i]**2);
+    if (vm > maxV) maxV = vm;
+    if (isFinite(r.p[i])) {
+      if (r.p[i] < minP) minP = r.p[i];
+      if (r.p[i] > maxP) maxP = r.p[i];
+    }
+  }
+  const Uin = parseFloat(document.getElementById('cfd-velocity').value) || 10;
+  const rho = parseFloat(document.getElementById('cfd-rho').value) || 1.225;
+  const dynP = 0.5 * rho * Uin * Uin;
+  document.getElementById('cfd-maxv').textContent = maxV.toFixed(2) + ' m/s';
+  document.getElementById('cfd-dynp').textContent = dynP.toFixed(1) + ' Pa';
+  document.getElementById('cfd-maxp').textContent = maxP.toFixed(1) + ' Pa';
+  document.getElementById('cfd-minp').textContent = minP.toFixed(1) + ' Pa';
+  const cpMin = dynP > 0 ? (minP / dynP).toFixed(2) : '--';
+  const cpMax = dynP > 0 ? (maxP / dynP).toFixed(2) : '--';
+  document.getElementById('cfd-cp').textContent = cpMin + ' to ' + cpMax;
+}
+
 function showCFDVectors() {
   // Clear previous CFD visualization (keep envelope)
   while (cfdGroup.children.length > 2) cfdGroup.remove(cfdGroup.children[cfdGroup.children.length - 1]);
@@ -2911,6 +3081,7 @@ function showCFDVectors() {
     const arrow = new THREE.ArrowHelper(dir, pos, arrowLen * (vm / maxV + 0.3), color, arrowLen * 0.3, arrowLen * 0.15);
     cfdGroup.add(arrow);
   }
+  updateCFDLegend('Velocity', 0, maxV, 'm/s');
 }
 
 function showCFDPressure() {
@@ -2945,7 +3116,10 @@ function showCFDPressure() {
   geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
   geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   const mat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.8, side: THREE.DoubleSide });
-  cfdGroup.add(new THREE.Mesh(geo, mat));
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.userData = { type: 'cfd-pressure', pressures, triangles: tris, minP, maxP };
+  cfdGroup.add(mesh);
+  updateCFDLegend('Pressure', minP, maxP, 'Pa');
 }
 
 function showCFDStreamlines() {
@@ -3011,6 +3185,7 @@ function showCFDStreamlines() {
       cfdGroup.add(new THREE.Line(geo, mat));
     }
   });
+  updateCFDLegend('Velocity', 0, maxV, 'm/s');
 }
 
 function showCFDSlice() {
@@ -3100,6 +3275,9 @@ function showCFDSlice() {
     const mat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.7, side: THREE.DoubleSide });
     cfdGroup.add(new THREE.Mesh(geo, mat));
   }
+  const fieldLabels = { vmag: 'Velocity', p: 'Pressure', k: 'Turb. KE', nut: 'Turb. Visc.' };
+  const fieldUnits = { vmag: 'm/s', p: 'Pa', k: 'm²/s²', nut: 'm²/s' };
+  updateCFDLegend(fieldLabels[fieldName] || fieldName, vMin, vMax, fieldUnits[fieldName] || '');
 }
 
 window.setCFDView = function(view, btn) {
@@ -3172,10 +3350,10 @@ window.applyCFDWindLoads = function() {
     const mz = (t.a.z + t.b.z + t.c.z) / 3;
     const pVal = trilinearInterp(cfdResults.p, mx, my, mz);
 
-    // Force = pressure * area * outward normal
-    const fx = pVal * t.area * t.nx / 3; // divided among 3 vertices
-    const fy = pVal * t.area * t.ny / 3;
-    const fz = pVal * t.area * t.nz / 3;
+    // Force = pressure * area * outward normal, convert Pa*m²=N to kN (/1000)
+    const fx = pVal * t.area * t.nx / 3 / 1000;
+    const fy = pVal * t.area * t.ny / 3 / 1000;
+    const fz = pVal * t.area * t.nz / 3 / 1000;
 
     [t.a, t.b, t.c].forEach(node => {
       const existing = nodeForces.get(node.id) || { fx: 0, fy: 0, fz: 0 };

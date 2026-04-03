@@ -7,7 +7,9 @@
 <link rel="stylesheet" href="./styles/index.css">
 </head>
 <body>
-<div id="canvas-container"></div>
+<div id="canvas-container">
+  <canvas id="cfd-legend-canvas" width="60" height="240"></canvas>
+</div>
 
 <!-- Mode Toolbar - Grouped -->
 <div id="mode-toolbar">
@@ -488,6 +490,14 @@ else:
     <div class="section-title">Results</div>
     <div id="cfd-solve-info" style="font-size:10px;color:#8ab;margin-bottom:6px;"></div>
 
+    <div id="cfd-stats" style="margin-bottom:8px;">
+      <div class="detail-row"><span class="key">Max velocity</span><span class="val" id="cfd-maxv">--</span></div>
+      <div class="detail-row"><span class="key">Dynamic pressure</span><span class="val" id="cfd-dynp">--</span></div>
+      <div class="detail-row"><span class="key">Max pressure</span><span class="val" id="cfd-maxp">--</span></div>
+      <div class="detail-row"><span class="key">Min pressure</span><span class="val" id="cfd-minp">--</span></div>
+      <div class="detail-row"><span class="key">Cp range</span><span class="val" id="cfd-cp">--</span></div>
+    </div>
+
     <div style="font-size:10px;color:#888;margin-bottom:4px;">Visualization</div>
     <div class="cfd-viz-row">
       <button class="cfd-viz-btn active" onclick="setCFDView('vectors',this)">Velocity Vectors</button>
@@ -507,6 +517,7 @@ else:
     </div>
 
     <button class="action-btn" onclick="applyCFDWindLoads()">Apply CFD Wind to FEM</button>
+    <button class="action-btn" style="margin-top:4px;" onclick="showResultsTable('cfd')">View CFD Data Table</button>
   </div>
 
   <canvas id="cfd-residual-canvas"></canvas>
@@ -589,6 +600,7 @@ else:
       <div class="tab-btns">
         <button class="tab-btn active" onclick="showTab('nodes',this)">Nodes</button>
         <button class="tab-btn" onclick="showTab('members',this)">Members</button>
+        <button class="tab-btn" onclick="showTab('cfd',this)">CFD</button>
       </div>
       <button class="export-btn" onclick="exportCSV()">Export CSV</button>
       <button class="close-table-btn" onclick="closeTable()">Close</button>
