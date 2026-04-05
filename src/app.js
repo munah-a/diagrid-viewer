@@ -4488,18 +4488,25 @@ def main():
         print(f"  Extracting displacements for LC{case_id}...")
         err_count = 0
         first_printed = False
+        # Use late-bound dispatch for results to avoid property marshalling issues
+        results_nodes = win32com.client.Dispatch(struct.Results.Nodes.Displacements)
         for n in NODES:
             rid = node_id_map[n["id"]]
             try:
-                d = struct.Results.Nodes.Displacements.Value(rid, case_id)
+                d = results_nodes.Value(rid, case_id)
+                ux = float(d.UX)
+                uy = float(d.UY)
+                uz = float(d.UZ)
+                rx = float(d.RX)
+                ry = float(d.RY)
+                rz = float(d.RZ)
                 if not first_printed:
-                    print(f"    Sample node {rid}: UX={d.UX}, UY={d.UY}, UZ={d.UZ}")
-                    print(f"    Type: {type(d)}, dir(d): {[a for a in dir(d) if not a.startswith('_')][:10]}")
+                    print(f"    Sample node {rid}: UX={ux}, UY={uy}, UZ={uz}")
                     first_printed = True
                 case_result["displacements"].append({
                     "nodeId": n["id"],
-                    "ux": d.UX, "uy": d.UY, "uz": d.UZ,
-                    "rx": d.RX, "ry": d.RY, "rz": d.RZ
+                    "ux": ux, "uy": uy, "uz": uz,
+                    "rx": rx, "ry": ry, "rz": rz
                 })
             except Exception as e:
                 if err_count == 0:
@@ -4514,18 +4521,19 @@ def main():
         # Bar forces (at start of bar)
         print(f"  Extracting member forces for LC{case_id}...")
         f_err_count = 0
+        results_bars = win32com.client.Dispatch(struct.Results.Bars.Forces)
         for b in BEAMS:
             rid = beam_id_map[b["id"]]
             try:
-                f0 = struct.Results.Bars.Forces.Value(rid, case_id, 0)
-                f1 = struct.Results.Bars.Forces.Value(rid, case_id, 1)
+                f0 = results_bars.Value(rid, case_id, 0)
+                f1 = results_bars.Value(rid, case_id, 1)
                 case_result["memberForces"].append({
                     "beamId": b["id"],
-                    "axial": f0.FX,
-                    "shearY": f0.FY, "shearZ": f0.FZ,
-                    "torsion": f0.MX,
-                    "momentY_start": f0.MY, "momentY_end": f1.MY,
-                    "momentZ_start": f0.MZ, "momentZ_end": f1.MZ
+                    "axial": float(f0.FX),
+                    "shearY": float(f0.FY), "shearZ": float(f0.FZ),
+                    "torsion": float(f0.MX),
+                    "momentY_start": float(f0.MY), "momentY_end": float(f1.MY),
+                    "momentZ_start": float(f0.MZ), "momentZ_end": float(f1.MZ)
                 })
             except Exception as e:
                 if f_err_count == 0:
@@ -4542,16 +4550,17 @@ def main():
 
         # Reactions at supported nodes
         print(f"  Extracting reactions for LC{case_id}...")
+        results_reactions = win32com.client.Dispatch(struct.Results.Nodes.Reactions)
         for nid_str in SUPPORTS:
             nid = int(nid_str)
             rid = node_id_map.get(nid)
             if not rid:
                 continue
             try:
-                r = struct.Results.Nodes.Reactions.Value(rid, case_id)
+                r = results_reactions.Value(rid, case_id)
                 case_result["reactions"][str(nid)] = {
-                    "fx": r.FX, "fy": r.FY, "fz": r.FZ,
-                    "mx": r.MX, "my": r.MY, "mz": r.MZ
+                    "fx": float(r.FX), "fy": float(r.FY), "fz": float(r.FZ),
+                    "mx": float(r.MX), "my": float(r.MY), "mz": float(r.MZ)
                 }
             except:
                 case_result["reactions"][str(nid)] = {
