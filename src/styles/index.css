@@ -1,4 +1,20 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  .help-btn {
+    background: rgba(100,140,255,0.15); border: 1px solid rgba(100,140,255,0.3);
+    color: #8ab; border-radius: 50%; width: 22px; height: 22px; font-size: 12px;
+    font-weight: bold; cursor: pointer; display: inline-flex; align-items: center;
+    justify-content: center; transition: all 0.2s;
+  }
+  .help-btn:hover { background: rgba(100,140,255,0.3); color: #fff; }
+  #help-modal h2 { color: #7cacff; margin-bottom: 12px; font-size: 18px; }
+  #help-modal h3 { color: #8bbcff; margin: 16px 0 8px; font-size: 14px; }
+  #help-modal p { margin-bottom: 10px; }
+  #help-modal ol, #help-modal ul { margin: 8px 0 12px 20px; }
+  #help-modal li { margin-bottom: 6px; }
+  #help-modal code { background: rgba(100,140,255,0.1); padding: 2px 6px; border-radius: 3px; font-family: Consolas, monospace; font-size: 12px; color: #adf; }
+  #help-modal .cmd-box { background: rgba(20,25,40,0.8); border-radius: 6px; padding: 10px 14px; font-family: Consolas, monospace; font-size: 12px; color: #8ab; margin: 8px 0 12px; border: 1px solid rgba(100,140,255,0.1); }
+  #help-modal .tip { background: rgba(80,180,100,0.1); border-left: 3px solid #5b5; padding: 8px 12px; border-radius: 0 6px 6px 0; margin: 10px 0; font-size: 12px; color: #8cb; }
+  #help-modal .warn { background: rgba(255,180,50,0.1); border-left: 3px solid #eb5; padding: 8px 12px; border-radius: 0 6px 6px 0; margin: 10px 0; font-size: 12px; color: #db8; }
   body { background: #0a0a0f; color: #e0e0e0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
   #canvas-container { width: 100vw; height: 100vh; position: relative; }
   canvas { display: block; }
