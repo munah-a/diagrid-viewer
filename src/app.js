@@ -4450,9 +4450,17 @@ def main():
     # --- Solve ---
     print("\\nRunning analysis...")
     t0 = time.time()
-    project.CalcEngine.Calculate()
+    calc = project.CalcEngine
+    calc.Calculate()
     t1 = time.time()
     print(f"Analysis completed in {t1 - t0:.1f} seconds")
+
+    # Check if analysis was successful
+    avail = struct.Results.Available
+    print(f"Results available: {avail}")
+    if not avail:
+        print("WARNING: No results available! Check for errors in Robot.")
+        print("Common causes: insufficient supports, unstable structure, no loads")
 
     # --- Extract Results ---
     print("\\nExtracting results...")
@@ -4478,6 +4486,7 @@ def main():
 
         # Node displacements
         print(f"  Extracting displacements for LC{case_id}...")
+        err_count = 0
         for n in NODES:
             rid = node_id_map[n["id"]]
             try:
@@ -4487,13 +4496,19 @@ def main():
                     "ux": d.UX, "uy": d.UY, "uz": d.UZ,
                     "rx": d.RX, "ry": d.RY, "rz": d.RZ
                 })
-            except:
+            except Exception as e:
+                if err_count == 0:
+                    print(f"    WARNING: displacement error for node {n['id']} (Robot ID {rid}): {e}")
+                err_count += 1
                 case_result["displacements"].append({
                     "nodeId": n["id"], "ux": 0, "uy": 0, "uz": 0, "rx": 0, "ry": 0, "rz": 0
                 })
+        if err_count > 0:
+            print(f"    {err_count}/{len(NODES)} nodes had displacement errors")
 
         # Bar forces (at start of bar)
         print(f"  Extracting member forces for LC{case_id}...")
+        f_err_count = 0
         for b in BEAMS:
             rid = beam_id_map[b["id"]]
             try:
@@ -4507,13 +4522,18 @@ def main():
                     "momentY_start": f0.MY, "momentY_end": f1.MY,
                     "momentZ_start": f0.MZ, "momentZ_end": f1.MZ
                 })
-            except:
+            except Exception as e:
+                if f_err_count == 0:
+                    print(f"    WARNING: force error for bar {b['id']} (Robot ID {rid}): {e}")
+                f_err_count += 1
                 case_result["memberForces"].append({
                     "beamId": b["id"],
                     "axial": 0, "shearY": 0, "shearZ": 0, "torsion": 0,
                     "momentY_start": 0, "momentY_end": 0,
                     "momentZ_start": 0, "momentZ_end": 0
                 })
+        if f_err_count > 0:
+            print(f"    {f_err_count}/{len(BEAMS)} bars had force errors")
 
         # Reactions at supported nodes
         print(f"  Extracting reactions for LC{case_id}...")
