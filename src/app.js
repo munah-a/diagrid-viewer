@@ -2591,7 +2591,7 @@ function createCFDWorkerCode() {
   return `
 'use strict';
 self.onmessage = function(e) {
-  const { nx, ny, nz, dx, dy, dz, cellType, rho, mu, Uin, dirAxis, dirSign, k_in, eps_in, maxIter, tol } = e.data;
+  const { nx, ny, nz, dx, dy, dz, cellType, rho, mu, Uin, Ux_in, Uy_in, dirAxis, dirSign, k_in, eps_in, maxIter, tol } = e.data;
   const N = nx * ny * nz;
   const idx = (i, j, k) => i + j * nx + k * nx * ny;
 
@@ -2608,11 +2608,11 @@ self.onmessage = function(e) {
   // Under-relaxation
   const alphaU = 0.5, alphaP = 0.2, alphaK = 0.5, alphaE = 0.5;
 
-  // Initialize fields
+  // Initialize fields with wind angle components
   for (let ii = 0; ii < N; ii++) {
     if (cellType[ii] !== 1) {
-      if (dirAxis === 0) u[ii] = Uin * dirSign;
-      else v[ii] = Uin * dirSign;
+      u[ii] = Ux_in;
+      v[ii] = Uy_in;
       k[ii] = k_in;
       eps[ii] = eps_in;
       nut[ii] = Cmu * k_in * k_in / (eps_in + 1e-30);
@@ -2623,26 +2623,58 @@ self.onmessage = function(e) {
   const Ax = dy * dz, Ay = dx * dz, Az = dx * dy;
   const vol = dx * dy * dz;
 
+  // Determine inlet/outlet faces based on wind direction
+  // Inlet faces are where flow enters the domain
+  const xInlet = Ux_in > 0 ? 0 : nx - 1;
+  const xOutlet = Ux_in > 0 ? nx - 1 : 0;
+  const yInlet = Uy_in > 0 ? 0 : ny - 1;
+  const yOutlet = Uy_in > 0 ? ny - 1 : 0;
+  const xHasFlow = Math.abs(Ux_in) > 0.01;
+  const yHasFlow = Math.abs(Uy_in) > 0.01;
+
   function applyBC(field, bcType) {
-    // bcType: 'vel_u', 'vel_v', 'vel_w', 'p', 'k', 'eps'
+    // X boundaries
     for (let j = 0; j < ny; j++) for (let kk = 0; kk < nz; kk++) {
-      // X boundaries
-      const iIn = dirAxis === 0 ? (dirSign > 0 ? 0 : nx - 1) : 0;
-      const iOut = dirAxis === 0 ? (dirSign > 0 ? nx - 1 : 0) : nx - 1;
-      if (bcType === 'vel_u') { field[idx(iIn, j, kk)] = dirAxis === 0 ? Uin * dirSign : 0; field[idx(iOut, j, kk)] = field[idx(iOut - (dirSign > 0 ? 1 : -1), j, kk)] || 0; }
-      else if (bcType === 'vel_v') { field[idx(iIn, j, kk)] = dirAxis === 1 ? Uin * dirSign : 0; field[idx(iOut, j, kk)] = field[idx(Math.max(0, Math.min(nx-1, iOut - 1)), j, kk)]; }
-      else if (bcType === 'vel_w') { field[idx(iIn, j, kk)] = 0; field[idx(iOut, j, kk)] = field[idx(Math.max(0, Math.min(nx-1, iOut - 1)), j, kk)]; }
-      else if (bcType === 'p') { field[idx(iOut, j, kk)] = 0; field[idx(iIn, j, kk)] = field[idx(iIn + (dirSign > 0 ? 1 : -1), j, kk)] || 0; }
-      else if (bcType === 'k') { field[idx(iIn, j, kk)] = k_in; field[idx(iOut, j, kk)] = field[idx(Math.max(0, Math.min(nx-1, iOut - 1)), j, kk)]; }
-      else if (bcType === 'eps') { field[idx(iIn, j, kk)] = eps_in; field[idx(iOut, j, kk)] = field[idx(Math.max(0, Math.min(nx-1, iOut - 1)), j, kk)]; }
+      if (bcType === 'vel_u') {
+        if (xHasFlow) { field[idx(xInlet, j, kk)] = Ux_in; field[idx(xOutlet, j, kk)] = field[idx(xOutlet + (Ux_in > 0 ? -1 : 1), j, kk)] || 0; }
+        else { field[idx(0, j, kk)] = field[idx(1, j, kk)]; field[idx(nx-1, j, kk)] = field[idx(nx-2, j, kk)]; }
+      } else if (bcType === 'vel_v') {
+        if (xHasFlow) { field[idx(xInlet, j, kk)] = Uy_in; field[idx(xOutlet, j, kk)] = field[idx(xOutlet + (Ux_in > 0 ? -1 : 1), j, kk)] || 0; }
+        else { field[idx(0, j, kk)] = field[idx(1, j, kk)]; field[idx(nx-1, j, kk)] = field[idx(nx-2, j, kk)]; }
+      } else if (bcType === 'vel_w') {
+        field[idx(0, j, kk)] = 0; field[idx(nx-1, j, kk)] = field[idx(nx-2, j, kk)];
+      } else if (bcType === 'p') {
+        if (xHasFlow) { field[idx(xOutlet, j, kk)] = 0; field[idx(xInlet, j, kk)] = field[idx(xInlet + (Ux_in > 0 ? 1 : -1), j, kk)] || 0; }
+      } else if (bcType === 'k') {
+        if (xHasFlow) { field[idx(xInlet, j, kk)] = k_in; }
+        field[idx(xOutlet, j, kk)] = field[idx(xOutlet + (Ux_in > 0 ? -1 : 1), j, kk)] || 0;
+      } else if (bcType === 'eps') {
+        if (xHasFlow) { field[idx(xInlet, j, kk)] = eps_in; }
+        field[idx(xOutlet, j, kk)] = field[idx(xOutlet + (Ux_in > 0 ? -1 : 1), j, kk)] || 0;
+      }
     }
     // Y boundaries
     for (let i = 0; i < nx; i++) for (let kk = 0; kk < nz; kk++) {
-      const jIn = dirAxis === 1 ? (dirSign > 0 ? 0 : ny - 1) : -1;
-      const jOut = dirAxis === 1 ? (dirSign > 0 ? ny - 1 : 0) : -1;
-      if (jIn >= 0 && bcType === 'vel_v') field[idx(i, jIn, kk)] = Uin * dirSign;
-      // Slip walls for non-inlet Y faces
-      if (dirAxis !== 1 || jIn < 0) {
+      if (bcType === 'vel_v') {
+        if (yHasFlow) { field[idx(i, yInlet, kk)] = Uy_in; field[idx(i, yOutlet, kk)] = field[idx(i, yOutlet + (Uy_in > 0 ? -1 : 1), kk)] || 0; }
+        else { field[idx(i, 0, kk)] = 0; field[idx(i, ny-1, kk)] = 0; }
+      } else if (bcType === 'vel_u') {
+        if (yHasFlow) { field[idx(i, yInlet, kk)] = Ux_in; field[idx(i, yOutlet, kk)] = field[idx(i, yOutlet + (Uy_in > 0 ? -1 : 1), kk)] || 0; }
+        else { field[idx(i, 0, kk)] = field[idx(i, 1, kk)]; field[idx(i, ny-1, kk)] = field[idx(i, ny-2, kk)]; }
+      } else if (bcType === 'vel_w') {
+        field[idx(i, 0, kk)] = 0; field[idx(i, ny-1, kk)] = field[idx(i, ny-2, kk)];
+      } else {
+        field[idx(i, 0, kk)] = field[idx(i, 1, kk)]; field[idx(i, ny-1, kk)] = field[idx(i, ny-2, kk)];
+        if (yHasFlow && (bcType === 'k' || bcType === 'eps')) {
+          field[idx(i, yInlet, kk)] = bcType === 'k' ? k_in : eps_in;
+        }
+      }
+    }
+    if (yHasFlow && bcType === 'p') {
+      for (let i = 0; i < nx; i++) for (let kk = 0; kk < nz; kk++) {
+        field[idx(i, yOutlet, kk)] = 0;
+      }
+    }
         if (bcType === 'vel_v') { field[idx(i, 0, kk)] = 0; field[idx(i, ny - 1, kk)] = 0; }
         else { field[idx(i, 0, kk)] = field[idx(i, 1, kk)]; field[idx(i, ny - 1, kk)] = field[idx(i, ny - 2, kk)]; }
       }
@@ -2986,9 +3018,13 @@ window.runCFD = async function() {
 
   // Read UI parameters
   const Uin = parseFloat(document.getElementById('cfd-velocity').value) || 10;
-  const dirStr = document.getElementById('cfd-dir').value;
-  const dirAxis = dirStr.includes('x') ? 0 : 1;
-  const dirSign = dirStr.startsWith('-') ? -1 : 1;
+  const angleDeg = parseFloat(document.getElementById('cfd-angle').value) || 0;
+  const angleRad = angleDeg * Math.PI / 180;
+  const Ux_in = Uin * Math.cos(angleRad);
+  const Uy_in = Uin * Math.sin(angleRad);
+  // Legacy compat: primary axis for BCs
+  const dirAxis = Math.abs(Ux_in) >= Math.abs(Uy_in) ? 0 : 1;
+  const dirSign = dirAxis === 0 ? (Ux_in >= 0 ? 1 : -1) : (Uy_in >= 0 ? 1 : -1);
   const rho = parseFloat(document.getElementById('cfd-rho').value) || 1.225;
   const mu = (parseFloat(document.getElementById('cfd-mu').value) || 1.81) * 1e-5;
   const turbI = (parseFloat(document.getElementById('cfd-turb-I').value) || 5) / 100;
@@ -3045,7 +3081,7 @@ window.runCFD = async function() {
   cfdWorker.postMessage({
     nx: cfdGrid.nx, ny: cfdGrid.ny, nz: cfdGrid.nz,
     dx: cfdGrid.dx, dy: cfdGrid.dy, dz: cfdGrid.dz,
-    cellType: cellType, rho, mu, Uin, dirAxis, dirSign,
+    cellType: cellType, rho, mu, Uin, Ux_in, Uy_in, dirAxis, dirSign,
     k_in, eps_in, maxIter, tol
   });
 };
@@ -3256,18 +3292,24 @@ function showCFDStreamlines() {
   if (!cfdResults) return;
   const g = cfdGrid;
 
-  // Seed points: grid of points upstream of structure
+  // Seed points: upstream of structure based on wind angle
   const seeds = [];
-  const dirStr = document.getElementById('cfd-dir').value;
-  const seedX = dirStr === '+x' ? minX - (maxX-minX)*0.5 : dirStr === '-x' ? maxX + (maxX-minX)*0.5 : (minX+maxX)/2;
-  const seedY = dirStr === '+y' ? minY - (maxY-minY)*0.5 : dirStr === '-y' ? maxY + (maxY-minY)*0.5 : (minY+maxY)/2;
-
+  const ang = (parseFloat(document.getElementById('cfd-angle').value) || 0) * Math.PI / 180;
+  const windDx = Math.cos(ang), windDy = Math.sin(ang);
+  // Place seeds upstream: offset from centroid in the opposite direction of wind
+  const cx = (minX+maxX)/2, cy = (minY+maxY)/2;
+  const span = Math.max(maxX-minX, maxY-minY);
+  const seedCx = cx - windDx * span * 0.8;
+  const seedCy = cy - windDy * span * 0.8;
+  // Perpendicular direction for seed spread
+  const perpX = -windDy, perpY = windDx;
   for (let j = 0; j < 5; j++) for (let kk = 0; kk < 5; kk++) {
-    if (dirStr.includes('x')) {
-      seeds.push({ x: seedX, y: minY + (maxY-minY) * (j+0.5)/5, z: minZ + (maxZ-minZ) * (kk+0.5)/5 });
-    } else {
-      seeds.push({ x: minX + (maxX-minX) * (j+0.5)/5, y: seedY, z: minZ + (maxZ-minZ) * (kk+0.5)/5 });
-    }
+    const spread = (j - 2) / 2.5 * span * 0.4;
+    seeds.push({
+      x: seedCx + perpX * spread,
+      y: seedCy + perpY * spread,
+      z: minZ + (maxZ-minZ) * (kk+0.5)/5
+    });
   }
 
   let maxV = 0;

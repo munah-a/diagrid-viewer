@@ -451,7 +451,7 @@ else:
   <div class="section-title" style="margin-top:0;border:none;padding-top:0;">Flow Parameters</div>
   <div class="input-row">
     <div class="input-group"><label>Inlet velocity (m/s)</label><input type="number" id="cfd-velocity" value="10" step="0.5" min="0.1"></div>
-    <div class="input-group"><label>Direction</label><select id="cfd-dir"><option value="+x">+X</option><option value="-x">-X</option><option value="+y">+Y</option><option value="-y">-Y</option></select></div>
+    <div class="input-group"><label>Wind angle (deg)</label><input type="number" id="cfd-angle" value="0" min="0" max="360" step="5" style="width:60px;"><span style="font-size:9px;color:#667;margin-left:4px;">0=+X, 90=+Y, 180=-X, 270=-Y</span></div>
   </div>
   <div class="input-row">
     <div class="input-group"><label>Air density (kg/m³)</label><input type="number" id="cfd-rho" value="1.225" step="0.01"></div>
