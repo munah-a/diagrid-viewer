@@ -415,7 +415,8 @@ function updateSupportVisuals() {
 
 window.autoAssignSupports = function() {
   const zThreshold = minZ + (maxZ - minZ) * 0.02;
-  nodes.forEach(n => { if (n.z <= zThreshold) supports.set(n.id, {type:'pinned',dir:null}); });
+  const supType = document.getElementById('support-type-select').value;
+  nodes.forEach(n => { if (n.z <= zThreshold) supports.set(n.id, {type:supType,dir:null}); });
   updateSupportVisuals(); updateStatusCounts(); updateSupportList();
 };
 window.clearSupports = function() { supports.clear(); updateSupportVisuals(); updateStatusCounts(); updateSupportList(); };
