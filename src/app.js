@@ -4487,10 +4487,15 @@ def main():
         # Node displacements
         print(f"  Extracting displacements for LC{case_id}...")
         err_count = 0
+        first_printed = False
         for n in NODES:
             rid = node_id_map[n["id"]]
             try:
                 d = struct.Results.Nodes.Displacements.Value(rid, case_id)
+                if not first_printed:
+                    print(f"    Sample node {rid}: UX={d.UX}, UY={d.UY}, UZ={d.UZ}")
+                    print(f"    Type: {type(d)}, dir(d): {[a for a in dir(d) if not a.startswith('_')][:10]}")
+                    first_printed = True
                 case_result["displacements"].append({
                     "nodeId": n["id"],
                     "ux": d.UX, "uy": d.UY, "uz": d.UZ,
