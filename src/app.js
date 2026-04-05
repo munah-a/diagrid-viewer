@@ -879,7 +879,24 @@ window.resetBeamSection = function() {
 };
 
 function updatePerimeterCount() {
-  document.getElementById('perim-count').textContent = perimeterSet.size > 0 ? perimeterSet.size + ' perimeter beams selected' : '';
+  // Check for open ends
+  const bAdj = new Map();
+  perimeterSet.forEach(bi => {
+    const b = beams[bi]; if (!b) return;
+    if (!bAdj.has(b.node_start)) bAdj.set(b.node_start, new Set());
+    if (!bAdj.has(b.node_end)) bAdj.set(b.node_end, new Set());
+    bAdj.get(b.node_start).add(b.node_end);
+    bAdj.get(b.node_end).add(b.node_start);
+  });
+  let openEnds = 0;
+  bAdj.forEach((n) => { if (n.size === 1) openEnds++; });
+  const info = perimeterSet.size > 0 ? perimeterSet.size + ' perimeter beams selected' : '';
+  const warn = openEnds > 0 ? ` (${openEnds} open ends)` : ' (closed loop)';
+  document.getElementById('perim-count').textContent = info + (perimeterSet.size > 0 ? warn : '');
+  // Debug: boundary degree distribution
+  const degDist = {};
+  bAdj.forEach(n => { degDist[n.size] = (degDist[n.size] || 0) + 1; });
+  window._perimDebug = { degDist, totalNodes: bAdj.size, totalEdges: perimeterSet.size, openEnds };
 }
 
 function highlightPerimeterBeam(bi, on) {
@@ -899,12 +916,92 @@ window.togglePerimeterBeam = function(bi) {
 };
 
 window.autoDetectPerimeter = function() {
+  // Build adjacency and beam lookup
+  const adj = new Map();
+  const beamLookup = new Map();
   beams.forEach((b, i) => {
-    if(!b)return;
-    const d1 = degree.get(b.node_start), d2 = degree.get(b.node_end);
-    if (d1 <= 3 && d2 <= 3) {
-      perimeterSet.add(i);
-      assignBeamToGroup(i, 'Perimeter');
+    if (!b) return;
+    if (!adj.has(b.node_start)) adj.set(b.node_start, new Set());
+    if (!adj.has(b.node_end)) adj.set(b.node_end, new Set());
+    adj.get(b.node_start).add(b.node_end);
+    adj.get(b.node_end).add(b.node_start);
+    const key = Math.min(b.node_start, b.node_end) + '-' + Math.max(b.node_start, b.node_end);
+    beamLookup.set(key, i);
+  });
+
+  // Step 1: Seed boundary nodes — degree 2 and 3 are definitely on the edge
+  const seeds = new Set();
+  nodes.forEach(n => { if (degree.get(n.id) <= 3) seeds.add(n.id); });
+
+  // Step 2: Walk the boundary loop(s).
+  const visited = new Set();
+  const boundaryEdges = new Set();
+
+  for (const startId of seeds) {
+    if (visited.has(startId)) continue;
+    const startNeighbors = [...(adj.get(startId) || [])].filter(n => seeds.has(n));
+    if (startNeighbors.length === 0) continue;
+
+    for (const firstNeighbor of startNeighbors) {
+      let prev = startId;
+      let curr = firstNeighbor;
+
+      while (true) {
+        const edgeKey = Math.min(prev, curr) + '-' + Math.max(prev, curr);
+        if (boundaryEdges.has(edgeKey)) break;
+        boundaryEdges.add(edgeKey);
+        visited.add(prev);
+        visited.add(curr);
+        if (curr === startId) break;
+
+        const neighbors = [...(adj.get(curr) || [])].filter(n => n !== prev);
+        if (neighbors.length === 0) break;
+
+        // Priority: seed nodes (deg ≤ 3) first
+        const seedNeighbors = neighbors.filter(n => seeds.has(n) && !boundaryEdges.has(
+          Math.min(curr, n) + '-' + Math.max(curr, n)
+        ));
+
+        if (seedNeighbors.length > 0) {
+          // Pick the closest seed neighbor
+          const currNode = nodeMap.get(curr);
+          let best = seedNeighbors[0], bestDist = Infinity;
+          for (const nid of seedNeighbors) {
+            const nn = nodeMap.get(nid);
+            const d = (nn.x - currNode.x) ** 2 + (nn.y - currNode.y) ** 2 + (nn.z - currNode.z) ** 2;
+            if (d < bestDist) { bestDist = d; best = nid; }
+          }
+          prev = curr;
+          curr = best;
+          continue;
+        }
+
+        // Bridge through non-seed: pick neighbor that reaches another seed
+        let found = false;
+        for (const cand of neighbors) {
+          if (boundaryEdges.has(Math.min(curr, cand) + '-' + Math.max(curr, cand))) continue;
+          const candNeighbors = adj.get(cand) || new Set();
+          let hasSeedBeyond = false;
+          candNeighbors.forEach(nn => {
+            if (nn !== curr && seeds.has(nn)) hasSeedBeyond = true;
+          });
+          if (hasSeedBeyond) {
+            prev = curr;
+            curr = cand;
+            found = true;
+            break;
+          }
+        }
+        if (!found) break;
+      }
+    }
+  }
+
+  boundaryEdges.forEach(key => {
+    const bi = beamLookup.get(key);
+    if (bi !== undefined) {
+      perimeterSet.add(bi);
+      assignBeamToGroup(bi, 'Perimeter');
     }
   });
   updatePerimeterCount();
@@ -1849,6 +1946,22 @@ orbitControls.addEventListener('change', () => {
 window.resetView = function(){camera.position.set(0,-60,30);orbitControls.target.set(cx,cz,-cy);orbitControls.update();};
 window.toggleAutoRotate = function(btn){btn.classList.toggle('active');orbitControls.autoRotate=btn.classList.contains('active');};
 window.toggleLoadsVisibility = function(btn){btn.classList.toggle('active');loadGroup.visible=btn.classList.contains('active');};
+
+let darkBg = true;
+window.toggleBackground = function(btn) {
+  darkBg = !darkBg;
+  btn.classList.toggle('active', !darkBg);
+  btn.textContent = darkBg ? 'Light BG' : 'Dark BG';
+  if (darkBg) {
+    scene.background = new THREE.Color(0x0a0a0f);
+    document.body.style.background = '#0a0a0f';
+    document.body.style.color = '#e0e0e0';
+  } else {
+    scene.background = new THREE.Color(0xe8ecf0);
+    document.body.style.background = '#e8ecf0';
+    document.body.style.color = '#222';
+  }
+};
 
 // ============================================================
 // TENSION CABLES VISUALIZATION
@@ -3869,6 +3982,55 @@ function updateRobotSummary() {
   document.getElementById('rb-sections').textContent = beamSections.size;
 }
 
+window.exportRobotJSON = function() {
+  saveActiveLoadCase();
+  const globalSec = { D: parseFloat(document.getElementById('chs-D').value), t: parseFloat(document.getElementById('chs-t').value) };
+  const E = parseFloat(document.getElementById('mat-E').value);
+  const rho = parseFloat(document.getElementById('mat-rho').value) || 7850;
+  let G = parseFloat(document.getElementById('mat-G').value);
+  if (isNaN(G) || G <= 0) G = 0;
+
+  const sectionsObj = {};
+  beamSections.forEach((v, k) => { sectionsObj[k] = { D: v.D, t: v.t }; });
+  const supportsObj = {};
+  supports.forEach((v, k) => { supportsObj[k] = { type: v.type, dir: v.dir || null }; });
+  const lcData = loadCases.map(lc => {
+    const pl = {};
+    lc.pointLoads.forEach((v, k) => { pl[k] = v; });
+    return { id: lc.id, name: lc.name, nature: lc.nature, selfWeight: lc.selfWeight, liveLoadIntensity: lc.liveLoadIntensity, pointLoads: pl, windPressure: lc.windLoad.pressure, windDir: lc.windLoad.dir };
+  });
+  const activeBeams = beams.filter(b => b).map(b => ({ id: b.id, node_start: b.node_start, node_end: b.node_end }));
+
+  // Envelope triangles (if generated)
+  let envelope = null;
+  if (cfdEnvelope && cfdEnvelope.triangles) {
+    envelope = {
+      triangles: cfdEnvelope.triangles.map(t => ({
+        a: t.a.id, b: t.b.id, c: t.c.id,
+        nx: t.nx, ny: t.ny, nz: t.nz, area: t.area
+      }))
+    };
+  }
+
+  const data = {
+    version: '1.0',
+    nodes: nodes.map(n => ({ id: n.id, x: n.x, y: n.y, z: n.z })),
+    beams: activeBeams,
+    globalSection: globalSec,
+    beamSections: sectionsObj,
+    material: { E, rho, G },
+    supports: supportsObj,
+    loadCases: lcData,
+    envelope: envelope
+  };
+
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'diagrid_model.json';
+  a.click();
+};
+
 window.exportToRobot = function() {
   saveActiveLoadCase();
 
@@ -3893,10 +4055,23 @@ window.exportToRobot = function() {
 
   const activeBeams = beams.filter(b => b).map(b => ({ id: b.id, node_start: b.node_start, node_end: b.node_end }));
 
+  // Envelope triangles for cladding panels
+  let envelopeData = [];
+  if (cfdEnvelope && cfdEnvelope.triangles) {
+    envelopeData = cfdEnvelope.triangles.map((t, i) => ({
+      id: i, a: t.a.id, b: t.b.id, c: t.c.id
+    }));
+  }
+
+  const ROBOT_SCRIPT_VERSION = '1.7.0';
+  const toPy = (obj) => JSON.stringify(obj).replace(/\bfalse\b/g, 'False').replace(/\btrue\b/g, 'True').replace(/\bnull\b/g, 'None');
+
   const script = `"""
 Diagrid Model -> Robot Structural Analysis Professional
 ========================================================
 Auto-generated by Diagrid Beam Model Viewer
+Script version: ${ROBOT_SCRIPT_VERSION}
+Generated: ${new Date().toISOString().slice(0, 19).replace('T', ' ')}
 Run: pip install pywin32 && python robot_export.py
 
 This script will:
@@ -3910,7 +4085,7 @@ import json, sys, time, os
 
 try:
     import win32com.client
-    from win32com.client import VARIANT
+    import win32com.client.gencache
     import pythoncom
 except ImportError:
     print("ERROR: pywin32 required. Install with: pip install pywin32")
@@ -3919,19 +4094,21 @@ except ImportError:
 # ================================================================
 # MODEL DATA
 # ================================================================
-NODES = ${JSON.stringify(nodes.map(n => ({ id: n.id, x: n.x, y: n.y, z: n.z })))}
+NODES = ${toPy(nodes.map(n => ({ id: n.id, x: n.x, y: n.y, z: n.z })))}
 
-BEAMS = ${JSON.stringify(activeBeams)}
+BEAMS = ${toPy(activeBeams)}
 
-GLOBAL_SECTION = ${JSON.stringify(globalSec)}
+GLOBAL_SECTION = ${toPy(globalSec)}
 
-BEAM_SECTIONS = ${JSON.stringify(sectionsObj)}
+BEAM_SECTIONS = ${toPy(sectionsObj)}
 
 MATERIAL = {"E": ${E}, "rho": ${rho}, "G": ${G || 0}}
 
-SUPPORTS = ${JSON.stringify(supportsObj)}
+SUPPORTS = ${toPy(supportsObj)}
 
-LOAD_CASES = ${JSON.stringify(lcData)}
+LOAD_CASES = ${toPy(lcData)}
+
+ENVELOPE_TRIANGLES = ${toPy(envelopeData)}
 
 OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "robot_results.json")
 
@@ -3939,11 +4116,11 @@ OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "robot_re
 # ROBOT COM CONSTANTS
 # ================================================================
 I_PT_FRAME_3D = 5
-I_LT_BAR_SECTION = 1
-I_LT_MATERIAL = 2
-I_LT_SUPPORT = 3
+I_LT_SUPPORT = 0
+I_LT_BAR_SECTION = 3
 I_LT_BAR_RELEASE = 4
-I_BSST_TUBE = 30
+I_LT_MATERIAL = 8
+I_BSST_USER_TUBE = 0
 I_MT_STEEL = 1
 I_CN_PERMANENT = 1
 I_CN_EXPLOATATION = 2
@@ -3956,61 +4133,90 @@ I_LRT_NODE_FORCE = 26
 
 NATURE_MAP = {"dead": I_CN_PERMANENT, "live": I_CN_EXPLOATATION, "wind": I_CN_WIND, "custom": I_CN_ACCIDENTAL}
 
+SCRIPT_VERSION = "${ROBOT_SCRIPT_VERSION}"
+
 def main():
     print("=" * 60)
-    print("  Diagrid Model -> Robot Structural Analysis")
+    print(f"  Diagrid Model -> Robot Structural Analysis  v{SCRIPT_VERSION}")
     print("=" * 60)
 
     print("\\nConnecting to Robot Structural Analysis...")
     try:
-        robot = win32com.client.Dispatch("Robot.Application")
-    except Exception as e:
-        print(f"ERROR: Could not connect to Robot. Is it installed?\\n{e}")
-        sys.exit(1)
+        robot = win32com.client.gencache.EnsureDispatch("Robot.Application")
+    except Exception:
+        try:
+            robot = win32com.client.Dispatch("Robot.Application")
+            print("  (Using late-bound COM dispatch)")
+        except Exception as e:
+            print(f"ERROR: Could not connect to Robot. Is it installed?\\n{e}")
+            sys.exit(1)
 
     robot.Visible = 1
     robot.Interactive = 1
     project = robot.Project
     project.New(I_PT_FRAME_3D)
+
+    # --- UK Preferences ---
+    print("Setting UK preferences...")
+    try:
+        prefs = project.Preferences
+        prefs.SetActiveCode(0, "BS EN 1993-1:2005")
+        prefs.SetActiveCode(5, "BS EN 1990:2002")
+    except Exception as e:
+        print(f"  Note: design codes: {e}")
+
     struct = project.Structure
     labels = struct.Labels
 
     # --- Material ---
     print(f"Defining material: Steel E={MATERIAL['E']} GPa, rho={MATERIAL['rho']} kg/m3")
+    mat_name = "STEEL"
     try:
-        mat_label = labels.Create(I_LT_MATERIAL, "Steel_Custom")
-        mat = mat_label.Data
-        mat.Type = I_MT_STEEL
-        mat.E = MATERIAL["E"] * 1e9
-        mat.NU = 0.3
-        mat.RO = MATERIAL["rho"]
-        mat.LX = 1.2e-5
+        mat_label = labels.Create(I_LT_MATERIAL, "S355")
+        mat_data = mat_label.Data
+        mat_data.E = MATERIAL["E"] * 1e9
+        mat_data.NU = 0.3
+        mat_data.RO = MATERIAL["rho"]
+        mat_data.LX = 1.2e-5
         G_val = MATERIAL["G"]
-        mat.Kirchoff = G_val * 1e9 if G_val > 0 else MATERIAL["E"] * 1e9 / 2.6
+        mat_data.Kirchoff = G_val * 1e9 if G_val > 0 else MATERIAL["E"] * 1e9 / 2.6
+        mat_data.RE = 355e6
+        mat_data.RT = 510e6
         labels.Store(mat_label)
+        mat_name = "S355"
+        print(f"  Created material: S355")
     except Exception as e:
-        print(f"  Warning: material creation: {e}")
+        print(f"  Custom material failed ({e})")
+        print(f"  Using Robot default: {mat_name}")
 
     # --- Sections ---
-    created_sections = set()
+    created_sections = {}
 
     def ensure_section(D_mm, t_mm):
-        name = f"CHS_{D_mm:.0f}x{t_mm:.0f}"
-        if name in created_sections:
-            return name
+        label_name = f"CHS {D_mm:.1f}x{t_mm:.1f}"
+        if label_name in created_sections:
+            return created_sections[label_name]
+
+        D_m = D_mm / 1000.0
+        t_m = t_mm / 1000.0
+
+        # Parametric CHS tube
         try:
-            sec_label = labels.Create(I_LT_BAR_SECTION, name)
-            sec = sec_label.Data
-            sec.ShapeType = I_BSST_TUBE
-            sec.SetValue(0, D_mm / 1000.0)
-            sec.SetValue(1, t_mm / 1000.0)
-            sec.CalcNonstdGeometry()
+            sec_label = labels.Create(I_LT_BAR_SECTION, label_name)
+            sec_data = sec_label.Data
+            sec_data.ShapeType = 2  # I_BSST_USER_CIRC_FILLED
+            nonstd = sec_data.CreateNonstd(0)
+            nonstd.SetValue(7, D_m)  # diameter
+            nonstd.SetValue(8, t_m)  # wall thickness
+            sec_data.CalcNonstdGeometry()
             labels.Store(sec_label)
-            created_sections.add(name)
+            created_sections[label_name] = label_name
+            print(f"  Section: {label_name}")
+            return label_name
         except Exception as e:
-            print(f"  Warning: section {name}: {e}")
-            created_sections.add(name)
-        return name
+            print(f"  Warning: section {label_name}: {e}")
+            created_sections[label_name] = label_name
+            return label_name
 
     global_sec_name = ensure_section(GLOBAL_SECTION["D"], GLOBAL_SECTION["t"])
     print(f"Global section: {global_sec_name}")
@@ -4025,10 +4231,14 @@ def main():
     print(f"Creating {len(NODES)} nodes...")
     nodes_server = struct.Nodes
     node_id_map = {}
+    nodes_map = {}
     for n in NODES:
         rid = n["id"] + 1
         node_id_map[n["id"]] = rid
+        nodes_map[n["id"]] = n
         nodes_server.Create(rid, n["x"], n["y"], n["z"])
+
+    objects = struct.Objects
 
     # --- Bars ---
     print(f"Creating {len(BEAMS)} bars...")
@@ -4045,7 +4255,7 @@ def main():
         bar = bars_server.Get(rid)
         sec_name = override_sec_names.get(idx, global_sec_name)
         bar.SetLabel(I_LT_BAR_SECTION, sec_name)
-        bar.SetLabel(I_LT_MATERIAL, "Steel_Custom")
+        bar.SetLabel(I_LT_MATERIAL, mat_name)
 
     # --- Supports ---
     print(f"Applying {len(SUPPORTS)} supports...")
@@ -4141,6 +4351,43 @@ def main():
             rec.SetValue(dof, sign * wp)
             rec.Objects.FromText(all_bars)
             print(f"  LC{case_id} '{lc['name']}': wind {wp} kN/m in {wd}")
+
+    # --- Cladding Panels (from CFD envelope triangles) ---
+    if ENVELOPE_TRIANGLES:
+        print(f"Creating {len(ENVELOPE_TRIANGLES)} cladding panels...")
+        # Create thickness label
+        try:
+            th_label = labels.Create(11, "Cladding_1mm")  # 11 = I_LT_PANEL_THICKNESS
+            th_data = th_label.Data
+            th_data.ThicknessType = 0  # uniform
+            th_data.Data.ThickConst = 0.001  # 1mm
+            labels.Store(th_label)
+        except:
+            pass
+
+        panel_start_id = max(b["id"] for b in BEAMS) + 1000
+        panel_count = 0
+        for tri in ENVELOPE_TRIANGLES:
+            try:
+                pid = panel_start_id + tri["id"]
+                na = nodes_map[tri["a"]]
+                nb = nodes_map[tri["b"]]
+                nc = nodes_map[tri["c"]]
+                # Create RobotPointsArray with 3 coplanar points
+                pts = win32com.client.Dispatch("Robot.PointsArray")
+                pts.SetSize(3)
+                pts.Set(1, na["x"], na["y"], na["z"])
+                pts.Set(2, nb["x"], nb["y"], nb["z"])
+                pts.Set(3, nc["x"], nc["y"], nc["z"])
+                objects.CreateContour(pid, pts)
+                # Assign thickness
+                obj = objects.Get(pid)
+                if obj:
+                    obj.SetLabel(11, "Cladding_1mm")
+                panel_count += 1
+            except:
+                pass
+        print(f"  Created {panel_count}/{len(ENVELOPE_TRIANGLES)} panels")
 
     # --- Solve ---
     print("\\nRunning analysis...")
