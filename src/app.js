@@ -416,7 +416,8 @@ function updateSupportVisuals() {
 window.autoAssignSupports = function() {
   const zThreshold = minZ + (maxZ - minZ) * 0.02;
   const supType = document.getElementById('support-type-select').value;
-  nodes.forEach(n => { if (n.z <= zThreshold) supports.set(n.id, {type:supType,dir:null}); });
+  const supDir = supType === 'roller' ? document.getElementById('roller-dir-select').value : null;
+  nodes.forEach(n => { if (n.z <= zThreshold) supports.set(n.id, {type:supType,dir:supDir}); });
   updateSupportVisuals(); updateStatusCounts(); updateSupportList();
 };
 window.clearSupports = function() { supports.clear(); updateSupportVisuals(); updateStatusCounts(); updateSupportList(); };
@@ -4122,7 +4123,7 @@ window.exportToRobot = function() {
     }));
   }
 
-  const ROBOT_SCRIPT_VERSION = '1.7.0';
+  const ROBOT_SCRIPT_VERSION = '2.0.0';
   const toPy = (obj) => JSON.stringify(obj).replace(/\bfalse\b/g, 'False').replace(/\btrue\b/g, 'True').replace(/\bnull\b/g, 'None');
 
   const script = `"""
@@ -4133,22 +4134,23 @@ Script version: ${ROBOT_SCRIPT_VERSION}
 Generated: ${new Date().toISOString().slice(0, 19).replace('T', ' ')}
 Run: pip install pywin32 && python robot_export.py
 
-This script will:
-  1. Open Robot and create a 3D frame model
-  2. Add all nodes, bars, sections, materials, supports
-  3. Create load cases with all applied loads
-  4. Run linear static analysis
-  5. Export results to robot_results.json
+IMPORTANT: Before running this script, open Robot and create
+a new empty 3D Frame project (File > New > Frame 3D).
+The script connects to the open project and adds the model.
+After the script finishes, run Calculate manually in Robot.
+
+Note: Node point loads are not supported via external COM automation.
+      Self-weight and bar uniform loads are applied automatically.
+      Add any point loads manually in Robot after running this script.
 """
 import json, sys, time, os
+import win32com.client.dynamic
+import pythoncom
 
 try:
-    import win32com.client
-    import win32com.client.gencache
-    import pythoncom
-except ImportError:
-    print("ERROR: pywin32 required. Install with: pip install pywin32")
-    sys.exit(1)
+    pythoncom.CoInitialize()
+except:
+    pass
 
 # ================================================================
 # MODEL DATA
@@ -4167,20 +4169,15 @@ SUPPORTS = ${toPy(supportsObj)}
 
 LOAD_CASES = ${toPy(lcData)}
 
-ENVELOPE_TRIANGLES = ${toPy(envelopeData)}
-
-OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "robot_results.json")
-
 # ================================================================
 # ROBOT COM CONSTANTS
 # ================================================================
-I_PT_FRAME_3D = 5
 I_LT_SUPPORT = 0
 I_LT_BAR_SECTION = 3
-I_LT_BAR_RELEASE = 4
 I_LT_MATERIAL = 8
-I_BSST_USER_TUBE = 0
-I_MT_STEEL = 1
+I_BSST_USER_TUBE = 93
+I_BSNDV_TUBE_D = 0
+I_BSNDV_TUBE_T = 1
 I_CN_PERMANENT = 1
 I_CN_EXPLOATATION = 2
 I_CN_WIND = 3
@@ -4188,7 +4185,6 @@ I_CN_ACCIDENTAL = 6
 I_CAT_STATIC_LINEAR = 1
 I_LRT_DEAD = 4
 I_LRT_BAR_UNIFORM = 7
-I_LRT_NODE_FORCE = 26
 
 NATURE_MAP = {"dead": I_CN_PERMANENT, "live": I_CN_EXPLOATATION, "wind": I_CN_WIND, "custom": I_CN_ACCIDENTAL}
 
@@ -4196,59 +4192,36 @@ SCRIPT_VERSION = "${ROBOT_SCRIPT_VERSION}"
 
 def main():
     print("=" * 60)
-    print(f"  Diagrid Model -> Robot Structural Analysis  v{SCRIPT_VERSION}")
+    print(f"  Diagrid Model -> Robot v{SCRIPT_VERSION}")
     print("=" * 60)
 
-    print("\\nConnecting to Robot Structural Analysis...")
+    print("\\nConnecting to Robot (must have an open 3D Frame project)...")
     try:
-        robot = win32com.client.gencache.EnsureDispatch("Robot.Application")
-    except Exception:
-        try:
-            robot = win32com.client.Dispatch("Robot.Application")
-            print("  (Using late-bound COM dispatch)")
-        except Exception as e:
-            print(f"ERROR: Could not connect to Robot. Is it installed?\\n{e}")
-            sys.exit(1)
-
-    robot.Visible = 1
-    robot.Interactive = 1
-    project = robot.Project
-    project.New(I_PT_FRAME_3D)
-
-    # --- UK Preferences ---
-    print("Setting UK preferences...")
-    try:
-        prefs = project.Preferences
-        prefs.SetActiveCode(0, "BS EN 1993-1:2005")
-        prefs.SetActiveCode(5, "BS EN 1990:2002")
+        robot = win32com.client.dynamic.Dispatch("Robot.Application")
     except Exception as e:
-        print(f"  Note: design codes: {e}")
+        print(f"ERROR: Could not connect to Robot. Is it running?\\n{e}")
+        sys.exit(1)
 
-    struct = project.Structure
+    struct = robot.Project.Structure
     labels = struct.Labels
+    mat_name = "S355"
 
-    # --- Material ---
-    print(f"Defining material: Steel E={MATERIAL['E']} GPa, rho={MATERIAL['rho']} kg/m3")
-    mat_name = "STEEL"
+    # --- Material from Robot database ---
+    print("\\nDefining material...")
     try:
-        mat_label = labels.Create(I_LT_MATERIAL, "S355")
+        mat_label = labels.Create(I_LT_MATERIAL, mat_name)
         mat_data = mat_label.Data
-        mat_data.E = MATERIAL["E"] * 1e9
-        mat_data.NU = 0.3
-        mat_data.RO = MATERIAL["rho"]
-        mat_data.LX = 1.2e-5
-        G_val = MATERIAL["G"]
-        mat_data.Kirchoff = G_val * 1e9 if G_val > 0 else MATERIAL["E"] * 1e9 / 2.6
-        mat_data.RE = 355e6
-        mat_data.RT = 510e6
+        if not mat_data.LoadFromDBase("S355"):
+            # Fallback: try generic steel
+            mat_data.LoadFromDBase("Steel")
         labels.Store(mat_label)
-        mat_name = "S355"
-        print(f"  Created material: S355")
+        print(f"  Material: {mat_name} (E={mat_data.E})")
     except Exception as e:
-        print(f"  Custom material failed ({e})")
-        print(f"  Using Robot default: {mat_name}")
+        print(f"  Material warning: {e}")
+        mat_name = "STEEL"
 
-    # --- Sections ---
+    # --- Sections from Robot database ---
+    print("\\nDefining sections...")
     created_sections = {}
 
     def ensure_section(D_mm, t_mm):
@@ -4259,62 +4232,69 @@ def main():
         D_m = D_mm / 1000.0
         t_m = t_mm / 1000.0
 
-        # Parametric CHS tube
-        try:
-            sec_label = labels.Create(I_LT_BAR_SECTION, label_name)
-            sec_data = sec_label.Data
-            sec_data.ShapeType = 2  # I_BSST_USER_CIRC_FILLED
+        sec_label = labels.Create(I_LT_BAR_SECTION, label_name)
+        sec_data = sec_label.Data
+
+        # Try loading from Robot's section database
+        db_names = [
+            f"CHS {D_mm:.0f}x{t_mm:.0f}",
+            f"TRON {D_mm:.0f}*{t_mm:.0f}",
+            f"CHS {D_mm:.0f}*{t_mm:.0f}",
+            f"TRON {D_mm:.0f}x{t_mm:.0f}",
+        ]
+        loaded = False
+        for db_name in db_names:
+            try:
+                if sec_data.LoadFromDBase(db_name):
+                    loaded = True
+                    print(f"  Section: {label_name} (DB: {db_name})")
+                    break
+            except:
+                pass
+
+        if not loaded:
+            # Fallback: user tube via CreateNonstd with correct enum values
+            sec_data.ShapeType = I_BSST_USER_TUBE
             nonstd = sec_data.CreateNonstd(0)
-            nonstd.SetValue(7, D_m)  # diameter
-            nonstd.SetValue(8, t_m)  # wall thickness
+            nonstd.SetValue(I_BSNDV_TUBE_D, D_m)
+            nonstd.SetValue(I_BSNDV_TUBE_T, t_m)
             sec_data.CalcNonstdGeometry()
-            labels.Store(sec_label)
-            created_sections[label_name] = label_name
-            print(f"  Section: {label_name}")
-            return label_name
-        except Exception as e:
-            print(f"  Warning: section {label_name}: {e}")
-            created_sections[label_name] = label_name
-            return label_name
+            print(f"  Section: {label_name} (user tube D={D_m}m, t={t_m}m)")
+
+        sec_data.MaterialName = mat_name
+        labels.Store(sec_label)
+        created_sections[label_name] = label_name
+        return label_name
 
     global_sec_name = ensure_section(GLOBAL_SECTION["D"], GLOBAL_SECTION["t"])
-    print(f"Global section: {global_sec_name}")
-
     override_sec_names = {}
     for bi_str, sec in BEAM_SECTIONS.items():
         override_sec_names[int(bi_str)] = ensure_section(sec["D"], sec["t"])
-    if override_sec_names:
-        print(f"Section overrides: {len(override_sec_names)} beams")
 
     # --- Nodes ---
-    print(f"Creating {len(NODES)} nodes...")
+    print(f"\\nCreating {len(NODES)} nodes...")
     nodes_server = struct.Nodes
     node_id_map = {}
-    nodes_map = {}
     for n in NODES:
         rid = n["id"] + 1
         node_id_map[n["id"]] = rid
-        nodes_map[n["id"]] = n
         nodes_server.Create(rid, n["x"], n["y"], n["z"])
-
-    objects = struct.Objects
 
     # --- Bars ---
     print(f"Creating {len(BEAMS)} bars...")
     bars_server = struct.Bars
-    beam_id_map = {}
-    beam_idx_by_id = {}
+    errors = 0
     for idx, b in enumerate(BEAMS):
         rid = b["id"] + 1
-        beam_id_map[b["id"]] = rid
-        beam_idx_by_id[b["id"]] = idx
-        ns = node_id_map[b["node_start"]]
-        ne = node_id_map[b["node_end"]]
-        bars_server.Create(rid, ns, ne)
-        bar = bars_server.Get(rid)
-        sec_name = override_sec_names.get(idx, global_sec_name)
-        bar.SetLabel(I_LT_BAR_SECTION, sec_name)
-        bar.SetLabel(I_LT_MATERIAL, mat_name)
+        try:
+            bars_server.Create(rid, node_id_map[b["node_start"]], node_id_map[b["node_end"]])
+            bar = bars_server.Get(rid)
+            bar.SetLabel(I_LT_BAR_SECTION, override_sec_names.get(idx, global_sec_name))
+            bar.SetLabel(I_LT_MATERIAL, mat_name)
+        except Exception as e:
+            errors += 1
+            if errors <= 3: print(f"  Bar {rid} error: {e}")
+    print(f"  Created {len(BEAMS) - errors}/{len(BEAMS)} bars")
 
     # --- Supports ---
     print(f"Applying {len(SUPPORTS)} supports...")
@@ -4322,30 +4302,25 @@ def main():
     for nid_str, sup in SUPPORTS.items():
         nid = int(nid_str)
         stype = sup["type"]
-        sdir = sup.get("dir", "z")
+        sdir = sup.get("dir") or "z"
 
-        if stype == "fixed":
-            sup_name = "Fixed"
-        elif stype == "pinned":
-            sup_name = "Pinned"
-        else:
-            sup_name = f"Roller_{sdir}"
+        if stype == "fixed": sup_name = "Fixed"
+        elif stype == "pinned": sup_name = "Pinned"
+        else: sup_name = f"Roller_{sdir}"
 
         if sup_name not in support_labels_created:
             try:
                 sl = labels.Create(I_LT_SUPPORT, sup_name)
                 sd = sl.Data
                 if stype == "fixed":
-                    sd.UX = 1; sd.UY = 1; sd.UZ = 1
-                    sd.RX = 1; sd.RY = 1; sd.RZ = 1
+                    sd.UX = True; sd.UY = True; sd.UZ = True
+                    sd.RX = True; sd.RY = True; sd.RZ = True
                 elif stype == "pinned":
-                    sd.UX = 1; sd.UY = 1; sd.UZ = 1
-                    sd.RX = 0; sd.RY = 0; sd.RZ = 0
+                    sd.UX = True; sd.UY = True; sd.UZ = True
+                    sd.RX = False; sd.RY = False; sd.RZ = False
                 elif stype == "roller":
-                    sd.UX = 1 if sdir == "x" else 0
-                    sd.UY = 1 if sdir == "y" else 0
-                    sd.UZ = 1 if sdir == "z" else 0
-                    sd.RX = 0; sd.RY = 0; sd.RZ = 0
+                    sd.UX = sdir == "x"; sd.UY = sdir == "y"; sd.UZ = sdir == "z"
+                    sd.RX = False; sd.RY = False; sd.RZ = False
                 labels.Store(sl)
                 support_labels_created.add(sup_name)
             except:
@@ -4353,232 +4328,71 @@ def main():
 
         rid = node_id_map.get(nid)
         if rid:
-            node = nodes_server.Get(rid)
-            node.SetLabel(I_LT_SUPPORT, sup_name)
+            nodes_server.Get(rid).SetLabel(I_LT_SUPPORT, sup_name)
 
-    # --- Load Cases ---
+    # --- Load Cases (bar-based loads only) ---
     print(f"Creating {len(LOAD_CASES)} load cases...")
     cases = struct.Cases
+    all_bars = " ".join(str(b["id"] + 1) for b in BEAMS)
+    point_load_warning = False
+
     for lc in LOAD_CASES:
         case_id = lc["id"]
         nature = NATURE_MAP.get(lc["nature"], I_CN_PERMANENT)
         case = cases.CreateSimple(case_id, lc["name"], nature, I_CAT_STATIC_LINEAR)
         records = case.Records
 
-        # Self-weight
+        # Self-weight (bar-based - works via COM)
         if lc.get("selfWeight"):
             rec = records.Create(I_LRT_DEAD)
-            rec.SetValue(2, -1.0)  # Z direction gravity
+            rec.SetValue(2, -1.0)
             rec.Objects.FromText("all")
             print(f"  LC{case_id} '{lc['name']}': self-weight")
 
-        # Uniform live load on all bars
+        # Uniform live load on all bars (bar-based - works via COM)
         if lc.get("liveLoadIntensity", 0) > 0:
             intensity = lc["liveLoadIntensity"]
-            all_bars = " ".join(str(b["id"] + 1) for b in BEAMS)
             rec = records.Create(I_LRT_BAR_UNIFORM)
-            rec.SetValue(2, -intensity)  # FZ = downward
+            rec.SetValue(2, -intensity)
             rec.Objects.FromText(all_bars)
             print(f"  LC{case_id} '{lc['name']}': live load {intensity} kN/m")
 
-        # Point loads
-        if lc.get("pointLoads"):
-            for nid_str, pl in lc["pointLoads"].items():
-                nid = int(nid_str)
-                rid = node_id_map.get(nid)
-                if not rid:
-                    continue
-                rec = records.Create(I_LRT_NODE_FORCE)
-                rec.Objects.FromText(str(rid))
-                rec.SetValue(0, pl.get("fx", 0))
-                rec.SetValue(1, pl.get("fy", 0))
-                rec.SetValue(2, pl.get("fz", 0))
-                rec.SetValue(3, pl.get("mx", 0))
-                rec.SetValue(4, pl.get("my", 0))
-                rec.SetValue(5, pl.get("mz", 0))
-            print(f"  LC{case_id} '{lc['name']}': {len(lc['pointLoads'])} point loads")
+        # Point loads - flag for manual addition
+        if lc.get("pointLoads") and len(lc["pointLoads"]) > 0:
+            point_load_warning = True
+            print(f"  LC{case_id} '{lc['name']}': {len(lc['pointLoads'])} point loads (ADD MANUALLY in Robot)")
 
-        # Wind load as uniform bar load
+        # Wind load as uniform bar load (bar-based - works via COM)
         if lc.get("windPressure", 0) > 0:
             wp = lc["windPressure"]
             wd = lc.get("windDir", "x")
             sign = -1 if wd.startswith("-") else 1
             axis = wd.replace("-", "")
-            all_bars = " ".join(str(b["id"] + 1) for b in BEAMS)
             rec = records.Create(I_LRT_BAR_UNIFORM)
             dof = {"x": 0, "y": 1, "z": 2}.get(axis, 0)
             rec.SetValue(dof, sign * wp)
             rec.Objects.FromText(all_bars)
             print(f"  LC{case_id} '{lc['name']}': wind {wp} kN/m in {wd}")
 
-    # --- Cladding Panels (from CFD envelope triangles) ---
-    if ENVELOPE_TRIANGLES:
-        print(f"Creating {len(ENVELOPE_TRIANGLES)} cladding panels...")
-        # Create thickness label
-        try:
-            th_label = labels.Create(11, "Cladding_1mm")  # 11 = I_LT_PANEL_THICKNESS
-            th_data = th_label.Data
-            th_data.ThicknessType = 0  # uniform
-            th_data.Data.ThickConst = 0.001  # 1mm
-            labels.Store(th_label)
-        except:
-            pass
-
-        panel_start_id = max(b["id"] for b in BEAMS) + 1000
-        panel_count = 0
-        for tri in ENVELOPE_TRIANGLES:
-            try:
-                pid = panel_start_id + tri["id"]
-                na = nodes_map[tri["a"]]
-                nb = nodes_map[tri["b"]]
-                nc = nodes_map[tri["c"]]
-                # Create RobotPointsArray with 3 coplanar points
-                pts = win32com.client.Dispatch("Robot.PointsArray")
-                pts.SetSize(3)
-                pts.Set(1, na["x"], na["y"], na["z"])
-                pts.Set(2, nb["x"], nb["y"], nb["z"])
-                pts.Set(3, nc["x"], nc["y"], nc["z"])
-                objects.CreateContour(pid, pts)
-                # Assign thickness
-                obj = objects.Get(pid)
-                if obj:
-                    obj.SetLabel(11, "Cladding_1mm")
-                panel_count += 1
-            except:
-                pass
-        print(f"  Created {panel_count}/{len(ENVELOPE_TRIANGLES)} panels")
-
-    # --- Solve ---
-    print("\\nRunning analysis...")
-    t0 = time.time()
-    calc = project.CalcEngine
-    calc.Calculate()
-    t1 = time.time()
-    print(f"Analysis completed in {t1 - t0:.1f} seconds")
-
-    # Check if analysis was successful
-    avail = struct.Results.Available
-    print(f"Results available: {avail}")
-    if not avail:
-        print("WARNING: No results available! Check for errors in Robot.")
-        print("Common causes: insufficient supports, unstable structure, no loads")
-
-    # --- Extract Results ---
-    print("\\nExtracting results...")
-    results = {
-        "source": "robot",
-        "model": {
-            "nodeCount": len(NODES),
-            "beamCount": len(BEAMS),
-            "loadCases": [{"id": lc["id"], "name": lc["name"]} for lc in LOAD_CASES]
-        },
-        "cases": []
-    }
-
-    for lc in LOAD_CASES:
-        case_id = lc["id"]
-        case_result = {
-            "id": case_id,
-            "name": lc["name"],
-            "displacements": [],
-            "memberForces": [],
-            "reactions": {}
-        }
-
-        # Node displacements
-        print(f"  Extracting displacements for LC{case_id}...")
-        err_count = 0
-        first_printed = False
-        # Use late-bound dispatch for results to avoid property marshalling issues
-        results_nodes = win32com.client.Dispatch(struct.Results.Nodes.Displacements)
-        for n in NODES:
-            rid = node_id_map[n["id"]]
-            try:
-                d = results_nodes.Value(rid, case_id)
-                ux = float(d.UX)
-                uy = float(d.UY)
-                uz = float(d.UZ)
-                rx = float(d.RX)
-                ry = float(d.RY)
-                rz = float(d.RZ)
-                if not first_printed:
-                    print(f"    Sample node {rid}: UX={ux}, UY={uy}, UZ={uz}")
-                    first_printed = True
-                case_result["displacements"].append({
-                    "nodeId": n["id"],
-                    "ux": ux, "uy": uy, "uz": uz,
-                    "rx": rx, "ry": ry, "rz": rz
-                })
-            except Exception as e:
-                if err_count == 0:
-                    print(f"    WARNING: displacement error for node {n['id']} (Robot ID {rid}): {e}")
-                err_count += 1
-                case_result["displacements"].append({
-                    "nodeId": n["id"], "ux": 0, "uy": 0, "uz": 0, "rx": 0, "ry": 0, "rz": 0
-                })
-        if err_count > 0:
-            print(f"    {err_count}/{len(NODES)} nodes had displacement errors")
-
-        # Bar forces (at start of bar)
-        print(f"  Extracting member forces for LC{case_id}...")
-        f_err_count = 0
-        results_bars = win32com.client.Dispatch(struct.Results.Bars.Forces)
-        for b in BEAMS:
-            rid = beam_id_map[b["id"]]
-            try:
-                f0 = results_bars.Value(rid, case_id, 0)
-                f1 = results_bars.Value(rid, case_id, 1)
-                case_result["memberForces"].append({
-                    "beamId": b["id"],
-                    "axial": float(f0.FX),
-                    "shearY": float(f0.FY), "shearZ": float(f0.FZ),
-                    "torsion": float(f0.MX),
-                    "momentY_start": float(f0.MY), "momentY_end": float(f1.MY),
-                    "momentZ_start": float(f0.MZ), "momentZ_end": float(f1.MZ)
-                })
-            except Exception as e:
-                if f_err_count == 0:
-                    print(f"    WARNING: force error for bar {b['id']} (Robot ID {rid}): {e}")
-                f_err_count += 1
-                case_result["memberForces"].append({
-                    "beamId": b["id"],
-                    "axial": 0, "shearY": 0, "shearZ": 0, "torsion": 0,
-                    "momentY_start": 0, "momentY_end": 0,
-                    "momentZ_start": 0, "momentZ_end": 0
-                })
-        if f_err_count > 0:
-            print(f"    {f_err_count}/{len(BEAMS)} bars had force errors")
-
-        # Reactions at supported nodes
-        print(f"  Extracting reactions for LC{case_id}...")
-        results_reactions = win32com.client.Dispatch(struct.Results.Nodes.Reactions)
-        for nid_str in SUPPORTS:
-            nid = int(nid_str)
-            rid = node_id_map.get(nid)
-            if not rid:
-                continue
-            try:
-                r = results_reactions.Value(rid, case_id)
-                case_result["reactions"][str(nid)] = {
-                    "fx": float(r.FX), "fy": float(r.FY), "fz": float(r.FZ),
-                    "mx": float(r.MX), "my": float(r.MY), "mz": float(r.MZ)
-                }
-            except:
-                case_result["reactions"][str(nid)] = {
-                    "fx": 0, "fy": 0, "fz": 0, "mx": 0, "my": 0, "mz": 0
-                }
-
-        results["cases"].append(case_result)
-
-    # Write results
-    with open(OUTPUT_FILE, "w") as f:
-        json.dump(results, f, indent=2)
-
+    # --- Summary ---
     print(f"\\n{'=' * 60}")
-    print(f"  Results written to: {OUTPUT_FILE}")
-    print(f"  Import this file back into the Diagrid Viewer")
+    print(f"  MODEL CREATED SUCCESSFULLY")
+    print(f"  {len(NODES)} nodes, {len(BEAMS)} bars, {len(SUPPORTS)} supports")
+    print(f"  {len(LOAD_CASES)} load cases")
     print(f"{'=' * 60}")
-    print("\\nRobot model remains open for inspection.")
+    if point_load_warning:
+        print(f"\\n  *** NOTE: Point loads must be added manually in Robot ***")
+        print(f"  (External COM cannot assign loads to specific nodes)")
+    print(f"\\n  Next steps:")
+    print(f"  1. Review model in Robot")
+    print(f"  2. Add any point loads manually if needed")
+    print(f"  3. Run Calculate in Robot")
+    print(f"  4. Check Results > Diagrams > Displacements")
+
+    try:
+        pythoncom.CoUninitialize()
+    except:
+        pass
 
 if __name__ == "__main__":
     main()

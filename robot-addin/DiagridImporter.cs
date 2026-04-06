@@ -169,15 +169,15 @@ namespace DiagridImporter
                 IRobotLabel matLabel = labels.Create(IRobotLabelType.I_LT_MATERIAL, materialName);
                 IRobotMaterialData mat = (IRobotMaterialData)matLabel.Data;
                 mat.Type = IRobotMaterialType.I_MT_STEEL;
-                mat.E = model.material.E * 1e9;
+                mat.E = model.material.E * 1e9;   // GPa -> Pa (in-process COM uses Pa)
                 mat.NU = 0.3;
                 mat.RO = model.material.rho;
                 mat.LX = 1.2e-5;
                 mat.Kirchoff = model.material.G > 0
                     ? model.material.G * 1e9
                     : model.material.E * 1e9 / 2.6;
-                mat.RE = 355e6;
-                mat.RT = 510e6;
+                mat.RE = 355e6;                    // 355 MPa in Pa
+                mat.RT = 510e6;                    // 510 MPa in Pa
                 labels.Store(matLabel);
                 Console.WriteLine("  Material: " + materialName + " (E=" + model.material.E + " GPa)");
             }
