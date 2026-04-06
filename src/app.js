@@ -4172,7 +4172,7 @@ LOAD_CASES = ${toPy(lcData)}
 # ================================================================
 # ROBOT COM CONSTANTS (from Robot API PDF p68-69)
 # ================================================================
-I_PT_FRAME_3D = 5
+I_PT_FRAME_3D = 7
 I_LT_SUPPORT = 0
 I_LT_BAR_SECTION = 3
 I_LT_MATERIAL = 8
