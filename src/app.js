@@ -4123,7 +4123,7 @@ window.exportToRobot = function() {
     }));
   }
 
-  const ROBOT_SCRIPT_VERSION = '2.0.0';
+  const ROBOT_SCRIPT_VERSION = '3.0.0';
   const toPy = (obj) => JSON.stringify(obj).replace(/\bfalse\b/g, 'False').replace(/\btrue\b/g, 'True').replace(/\bnull\b/g, 'None');
 
   const script = `"""
@@ -4134,14 +4134,14 @@ Script version: ${ROBOT_SCRIPT_VERSION}
 Generated: ${new Date().toISOString().slice(0, 19).replace('T', ' ')}
 Run: pip install pywin32 && python robot_export.py
 
-IMPORTANT: Before running this script, open Robot and create
-a new empty 3D Frame project (File > New > Frame 3D).
-The script connects to the open project and adds the model.
-After the script finishes, run Calculate manually in Robot.
+This script will:
+  1. Open Robot and create a new 3D frame model
+  2. Add all nodes, bars, sections (from DB), materials, supports
+  3. Create load cases with all loads (including point loads)
+  4. Run linear static analysis
+  5. Export results to robot_results.json
 
-Note: Node point loads are not supported via external COM automation.
-      Self-weight and bar uniform loads are applied automatically.
-      Add any point loads manually in Robot after running this script.
+All Robot COM values use SI units (N, m, Pa).
 """
 import json, sys, time, os
 import win32com.client.dynamic
@@ -4170,37 +4170,50 @@ SUPPORTS = ${toPy(supportsObj)}
 LOAD_CASES = ${toPy(lcData)}
 
 # ================================================================
-# ROBOT COM CONSTANTS
+# ROBOT COM CONSTANTS (from Robot API PDF p68-69)
 # ================================================================
+I_PT_FRAME_3D = 5
 I_LT_SUPPORT = 0
 I_LT_BAR_SECTION = 3
 I_LT_MATERIAL = 8
-I_BSST_USER_TUBE = 93
-I_BSNDV_TUBE_D = 0
-I_BSNDV_TUBE_T = 1
 I_CN_PERMANENT = 1
 I_CN_EXPLOATATION = 2
 I_CN_WIND = 3
 I_CN_ACCIDENTAL = 6
 I_CAT_STATIC_LINEAR = 1
-I_LRT_DEAD = 4
-I_LRT_BAR_UNIFORM = 7
+# Load record types (IRobotLoadRecordType)
+I_LRT_NODE_FORCE = 0
+I_LRT_BAR_UNIFORM = 5
+I_LRT_DEAD = 7
 
 NATURE_MAP = {"dead": I_CN_PERMANENT, "live": I_CN_EXPLOATATION, "wind": I_CN_WIND, "custom": I_CN_ACCIDENTAL}
 
 SCRIPT_VERSION = "${ROBOT_SCRIPT_VERSION}"
+
+OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "robot_results.json")
 
 def main():
     print("=" * 60)
     print(f"  Diagrid Model -> Robot v{SCRIPT_VERSION}")
     print("=" * 60)
 
-    print("\\nConnecting to Robot (must have an open 3D Frame project)...")
+    print("\\nConnecting to Robot...")
     try:
         robot = win32com.client.dynamic.Dispatch("Robot.Application")
     except Exception as e:
-        print(f"ERROR: Could not connect to Robot. Is it running?\\n{e}")
+        print(f"ERROR: Could not connect to Robot. Is it installed?\\n{e}")
         sys.exit(1)
+
+    robot.Visible = 1
+    robot.Interactive = 0
+    try:
+        robot.Project.Close()
+    except:
+        pass
+    robot.Project.New(I_PT_FRAME_3D)
+    time.sleep(2)
+    robot.Interactive = 1
+    print(f"  Created new 3D Frame project")
 
     struct = robot.Project.Structure
     labels = struct.Labels
@@ -4253,13 +4266,9 @@ def main():
                 pass
 
         if not loaded:
-            # Fallback: user tube via CreateNonstd with correct enum values
-            sec_data.ShapeType = I_BSST_USER_TUBE
-            nonstd = sec_data.CreateNonstd(0)
-            nonstd.SetValue(I_BSNDV_TUBE_D, D_m)
-            nonstd.SetValue(I_BSNDV_TUBE_T, t_m)
-            sec_data.CalcNonstdGeometry()
-            print(f"  Section: {label_name} (user tube D={D_m}m, t={t_m}m)")
+            print(f"  WARNING: Section {label_name} not found in Robot database")
+            print(f"    Tried: {db_names}")
+            print(f"    CalcNonstdGeometry does not work via COM - section will use Robot default")
 
         sec_data.MaterialName = mat_name
         labels.Store(sec_label)
@@ -4330,11 +4339,10 @@ def main():
         if rid:
             nodes_server.Get(rid).SetLabel(I_LT_SUPPORT, sup_name)
 
-    # --- Load Cases (bar-based loads only) ---
+    # --- Load Cases (all units SI: N, m, N/m) ---
     print(f"Creating {len(LOAD_CASES)} load cases...")
     cases = struct.Cases
     all_bars = " ".join(str(b["id"] + 1) for b in BEAMS)
-    point_load_warning = False
 
     for lc in LOAD_CASES:
         case_id = lc["id"]
@@ -4342,52 +4350,164 @@ def main():
         case = cases.CreateSimple(case_id, lc["name"], nature, I_CAT_STATIC_LINEAR)
         records = case.Records
 
-        # Self-weight (bar-based - works via COM)
+        # Self-weight
         if lc.get("selfWeight"):
             rec = records.Create(I_LRT_DEAD)
-            rec.SetValue(2, -1.0)
             rec.Objects.FromText("all")
             print(f"  LC{case_id} '{lc['name']}': self-weight")
 
-        # Uniform live load on all bars (bar-based - works via COM)
+        # Uniform live load on all bars (kN/m -> N/m for SI)
         if lc.get("liveLoadIntensity", 0) > 0:
-            intensity = lc["liveLoadIntensity"]
+            intensity_Npm = lc["liveLoadIntensity"] * 1000  # kN/m -> N/m
             rec = records.Create(I_LRT_BAR_UNIFORM)
-            rec.SetValue(2, -intensity)
+            rec.SetValue(2, -intensity_Npm)  # PZ in N/m
             rec.Objects.FromText(all_bars)
-            print(f"  LC{case_id} '{lc['name']}': live load {intensity} kN/m")
+            print(f"  LC{case_id} '{lc['name']}': live load {lc['liveLoadIntensity']} kN/m")
 
-        # Point loads - flag for manual addition
-        if lc.get("pointLoads") and len(lc["pointLoads"]) > 0:
-            point_load_warning = True
-            print(f"  LC{case_id} '{lc['name']}': {len(lc['pointLoads'])} point loads (ADD MANUALLY in Robot)")
+        # Point loads (now works with correct I_LRT_NODE_FORCE=0)
+        if lc.get("pointLoads"):
+            count = 0
+            for nid_str, pl in lc["pointLoads"].items():
+                nid = int(nid_str)
+                rid = node_id_map.get(nid)
+                if not rid:
+                    continue
+                rec = records.Create(I_LRT_NODE_FORCE)
+                rec.Objects.FromText(str(rid))
+                rec.SetValue(0, pl.get("fx", 0) * 1000)  # kN -> N
+                rec.SetValue(1, pl.get("fy", 0) * 1000)
+                rec.SetValue(2, pl.get("fz", 0) * 1000)
+                rec.SetValue(3, pl.get("mx", 0) * 1000)  # kN.m -> N.m
+                rec.SetValue(4, pl.get("my", 0) * 1000)
+                rec.SetValue(5, pl.get("mz", 0) * 1000)
+                count += 1
+            if count > 0:
+                print(f"  LC{case_id} '{lc['name']}': {count} point loads")
 
-        # Wind load as uniform bar load (bar-based - works via COM)
+        # Wind load as uniform bar load (kN/m -> N/m)
         if lc.get("windPressure", 0) > 0:
-            wp = lc["windPressure"]
+            wp_Npm = lc["windPressure"] * 1000  # kN/m -> N/m
             wd = lc.get("windDir", "x")
             sign = -1 if wd.startswith("-") else 1
             axis = wd.replace("-", "")
             rec = records.Create(I_LRT_BAR_UNIFORM)
             dof = {"x": 0, "y": 1, "z": 2}.get(axis, 0)
-            rec.SetValue(dof, sign * wp)
+            rec.SetValue(dof, sign * wp_Npm)
             rec.Objects.FromText(all_bars)
-            print(f"  LC{case_id} '{lc['name']}': wind {wp} kN/m in {wd}")
+            print(f"  LC{case_id} '{lc['name']}': wind {lc['windPressure']} kN/m in {wd}")
 
-    # --- Summary ---
+    # --- Solve ---
+    print("\\nRunning analysis...")
+    robot.Interactive = 0
+    t0 = time.time()
+    calc = robot.Project.CalcEngine
+    calc.GenerateModel()
+    calc.Calculate()
+    time.sleep(3)
+    t1 = time.time()
+    robot.Interactive = 1
+    print(f"Analysis completed in {t1 - t0:.1f} seconds")
+
+    avail = struct.Results.Available
+    print(f"Results available: {avail}")
+    if not avail:
+        print("WARNING: No results available! Check for errors in Robot.")
+
+    # --- Extract Results (all SI: N, m, N.m) ---
+    print("\\nExtracting results...")
+    results = {
+        "source": "robot",
+        "units": {"force": "kN", "length": "m", "moment": "kN.m"},
+        "model": {
+            "nodeCount": len(NODES),
+            "beamCount": len(BEAMS),
+            "loadCases": [{"id": lc["id"], "name": lc["name"]} for lc in LOAD_CASES]
+        },
+        "cases": []
+    }
+
+    for lc in LOAD_CASES:
+        case_id = lc["id"]
+        case_result = {
+            "id": case_id,
+            "name": lc["name"],
+            "displacements": [],
+            "memberForces": [],
+            "reactions": {}
+        }
+
+        # Node displacements (m -> m, rad -> rad)
+        err_count = 0
+        for n in NODES:
+            rid = node_id_map[n["id"]]
+            try:
+                d = struct.Results.Nodes.Displacements.Value(rid, case_id)
+                case_result["displacements"].append({
+                    "nodeId": n["id"],
+                    "ux": float(d.UX), "uy": float(d.UY), "uz": float(d.UZ),
+                    "rx": float(d.RX), "ry": float(d.RY), "rz": float(d.RZ)
+                })
+            except:
+                err_count += 1
+                case_result["displacements"].append({
+                    "nodeId": n["id"], "ux": 0, "uy": 0, "uz": 0, "rx": 0, "ry": 0, "rz": 0
+                })
+        if err_count > 0:
+            print(f"  LC{case_id}: {err_count}/{len(NODES)} displacement errors")
+
+        # Bar forces (N -> kN, N.m -> kN.m)
+        f_err = 0
+        for b in BEAMS:
+            rid = b["id"] + 1
+            try:
+                f0 = struct.Results.Bars.Forces.Value(rid, case_id, 0)
+                f1 = struct.Results.Bars.Forces.Value(rid, case_id, 1)
+                case_result["memberForces"].append({
+                    "beamId": b["id"],
+                    "axial": float(f0.FX) / 1000,
+                    "shearY": float(f0.FY) / 1000, "shearZ": float(f0.FZ) / 1000,
+                    "torsion": float(f0.MX) / 1000,
+                    "momentY_start": float(f0.MY) / 1000, "momentY_end": float(f1.MY) / 1000,
+                    "momentZ_start": float(f0.MZ) / 1000, "momentZ_end": float(f1.MZ) / 1000
+                })
+            except:
+                f_err += 1
+                case_result["memberForces"].append({
+                    "beamId": b["id"],
+                    "axial": 0, "shearY": 0, "shearZ": 0, "torsion": 0,
+                    "momentY_start": 0, "momentY_end": 0, "momentZ_start": 0, "momentZ_end": 0
+                })
+        if f_err > 0:
+            print(f"  LC{case_id}: {f_err}/{len(BEAMS)} force errors")
+
+        # Reactions at supported nodes (N -> kN, N.m -> kN.m)
+        for nid_str in SUPPORTS:
+            nid = int(nid_str)
+            rid = node_id_map.get(nid)
+            if not rid:
+                continue
+            try:
+                r = struct.Results.Nodes.Reactions.Value(rid, case_id)
+                case_result["reactions"][str(nid)] = {
+                    "fx": float(r.FX) / 1000, "fy": float(r.FY) / 1000, "fz": float(r.FZ) / 1000,
+                    "mx": float(r.MX) / 1000, "my": float(r.MY) / 1000, "mz": float(r.MZ) / 1000
+                }
+            except:
+                case_result["reactions"][str(nid)] = {
+                    "fx": 0, "fy": 0, "fz": 0, "mx": 0, "my": 0, "mz": 0
+                }
+
+        results["cases"].append(case_result)
+
+    with open(OUTPUT_FILE, "w") as f:
+        json.dump(results, f, indent=2)
+
     print(f"\\n{'=' * 60}")
-    print(f"  MODEL CREATED SUCCESSFULLY")
+    print(f"  Results written to: {OUTPUT_FILE}")
     print(f"  {len(NODES)} nodes, {len(BEAMS)} bars, {len(SUPPORTS)} supports")
     print(f"  {len(LOAD_CASES)} load cases")
     print(f"{'=' * 60}")
-    if point_load_warning:
-        print(f"\\n  *** NOTE: Point loads must be added manually in Robot ***")
-        print(f"  (External COM cannot assign loads to specific nodes)")
-    print(f"\\n  Next steps:")
-    print(f"  1. Review model in Robot")
-    print(f"  2. Add any point loads manually if needed")
-    print(f"  3. Run Calculate in Robot")
-    print(f"  4. Check Results > Diagrams > Displacements")
+    print("\\nRobot model remains open for inspection.")
 
     try:
         pythoncom.CoUninitialize()
