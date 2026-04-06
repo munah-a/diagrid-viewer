@@ -548,6 +548,68 @@ window.updateLoadCaseNature = function(nature) {
 };
 
 // Sum force vectors across all load cases for FEM
+/**
+ * Compute consistent equivalent nodal loads for a uniform distributed load
+ * in global coordinates. Includes both forces (wL/2) and fixed-end moments (wL²/12).
+ *
+ * For a uniform load w_global = [wx, wy, wz] in kN/m on a beam:
+ * 1. Transform w to local coords: w_local = R * w_global
+ * 2. Compute consistent nodal loads in local coords:
+ *    - Fy1 = Fy2 = wy_local * L / 2
+ *    - Fz1 = Fz2 = wz_local * L / 2
+ *    - Fx1 = Fx2 = wx_local * L / 2 (axial)
+ *    - Mz1 = -wy_local * L² / 12,  Mz2 = +wy_local * L² / 12
+ *    - My1 = +wz_local * L² / 12,  My2 = -wz_local * L² / 12
+ * 3. Transform nodal loads back to global: f_global = T^T * f_local
+ */
+function addConsistentBeamLoad(F, bi, b, wx, wy, wz) {
+  const n1 = nodeMap.get(b.node_start), n2 = nodeMap.get(b.node_end);
+  const L = beamLengths[bi];
+  const R3 = buildRotationMatrix(n1, n2);
+
+  // Transform global load to local coordinates
+  const wlx = R3[0][0]*wx + R3[0][1]*wy + R3[0][2]*wz;
+  const wly = R3[1][0]*wx + R3[1][1]*wy + R3[1][2]*wz;
+  const wlz = R3[2][0]*wx + R3[2][1]*wy + R3[2][2]*wz;
+
+  // Consistent nodal loads in local coords (12 DOFs: node1[0-5], node2[6-11])
+  const fl = new Float64Array(12);
+  const L2_12 = L * L / 12;
+  // Node 1
+  fl[0] = wlx * L / 2;             // Fx1
+  fl[1] = wly * L / 2;             // Fy1
+  fl[2] = wlz * L / 2;             // Fz1
+  fl[3] = 0;                        // Mx1 (no torsion from UDL)
+  fl[4] = wlz * L2_12;             // My1 = +wz*L²/12
+  fl[5] = -wly * L2_12;            // Mz1 = -wy*L²/12
+  // Node 2
+  fl[6] = wlx * L / 2;             // Fx2
+  fl[7] = wly * L / 2;             // Fy2
+  fl[8] = wlz * L / 2;             // Fz2
+  fl[9] = 0;                        // Mx2
+  fl[10] = -wlz * L2_12;           // My2 = -wz*L²/12
+  fl[11] = wly * L2_12;            // Mz2 = +wy*L²/12
+
+  // Build 12x12 transformation matrix T (block diagonal of R3)
+  const T = Array.from({length:12}, () => new Float64Array(12));
+  for (let bl = 0; bl < 4; bl++)
+    for (let i = 0; i < 3; i++)
+      for (let j = 0; j < 3; j++)
+        T[bl*3+i][bl*3+j] = R3[i][j];
+
+  // Transform to global: f_global = T^T * f_local
+  const fg = new Float64Array(12);
+  for (let i = 0; i < 12; i++) {
+    let s = 0;
+    for (let k = 0; k < 12; k++) s += T[k][i] * fl[k];
+    fg[i] = s;
+  }
+
+  // Add to global force vector
+  const si = nIdx.get(b.node_start), ei = nIdx.get(b.node_end);
+  for (let d = 0; d < 6; d++) { F[si*6+d] += fg[d]; F[ei*6+d] += fg[6+d]; }
+}
+
 function computeTotalForceVector() {
   saveActiveLoadCase();
   const F = new Float64Array(nodes.length * 6);
@@ -561,17 +623,14 @@ function computeTotalForceVector() {
         if (!b) return;
         const bsec = beamSections.has(bi) ? beamSections.get(bi) : null;
         const bA = bsec ? Math.PI / 4 * ((bsec.D / 1000) ** 2 - (bsec.D / 1000 - 2 * bsec.t / 1000) ** 2) : A;
-        const wkN = rho * bA * beamLengths[bi] * g / 2 / 1000;
-        const si = nIdx.get(b.node_start), ei = nIdx.get(b.node_end);
-        F[si * 6 + 2] -= wkN; F[ei * 6 + 2] -= wkN;
+        const wkNm = rho * bA * g / 1000; // kN/m (weight per unit length)
+        addConsistentBeamLoad(F, bi, b, 0, 0, -wkNm);
       });
     }
     if (lc.liveLoadIntensity > 0) {
       beams.forEach((b, bi) => {
         if (!b) return;
-        const w = lc.liveLoadIntensity * beamLengths[bi] / 2;
-        const si = nIdx.get(b.node_start), ei = nIdx.get(b.node_end);
-        F[si * 6 + 2] -= w; F[ei * 6 + 2] -= w;
+        addConsistentBeamLoad(F, bi, b, 0, 0, -lc.liveLoadIntensity);
       });
     }
     lc.pointLoads.forEach((load, nid) => {
@@ -583,13 +642,13 @@ function computeTotalForceVector() {
       const dir = lc.windLoad.dir;
       const sign = dir.startsWith('-') ? -1 : 1;
       const axis = dir.replace('-', '');
+      const wx = axis === 'x' ? sign * 1 : 0;
+      const wy = axis === 'y' ? sign * 1 : 0;
+      const wz = axis === 'z' ? sign * 1 : 0;
       beams.forEach((b, bi) => {
         if (!b) return;
-        const load = lc.windLoad.pressure * beamLengths[bi] / 2;
-        const si = nIdx.get(b.node_start), ei = nIdx.get(b.node_end);
-        const dofOff = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
-        F[si * 6 + dofOff] += sign * load;
-        F[ei * 6 + dofOff] += sign * load;
+        const p = lc.windLoad.pressure;
+        addConsistentBeamLoad(F, bi, b, wx * p, wy * p, wz * p);
       });
     }
   }
@@ -1446,11 +1505,28 @@ window.runFEM = async function() {
     };
   });
 
+  // Compute per-support reactions: R_i = K_row * u - F_applied_i at restrained DOFs
   const Fapplied=computeTotalForceVector();
-  let sumFx=0,sumFy=0,sumFz=0;
-  for(let i=0;i<nodes.length;i++){sumFx+=Fapplied[i*6];sumFy+=Fapplied[i*6+1];sumFz+=Fapplied[i*6+2];}
-  // Reactions from equilibrium: R = -F_applied (since sum of all forces = 0)
-  const sumRx=-sumFx, sumRy=-sumFy, sumRz=-sumFz;
+  const reactions = new Map();
+  let sumRx=0, sumRy=0, sumRz=0;
+  supports.forEach((_sup, nid) => {
+    const idx = nIdx.get(nid);
+    if (idx === undefined) return;
+    const rx = {fx:0, fy:0, fz:0, mx:0, my:0, mz:0};
+    for (let d = 0; d < 6; d++) {
+      const dof = idx * 6 + d;
+      // R = sum(K[dof][j] * u[j]) - F[dof], but with penalty method:
+      // K[dof][dof] = 1e15, u[dof] ≈ 0, so R ≈ -F[dof] for restrained DOFs
+      // More accurately: compute K*u at this row from the original assembly
+      let Ku = 0;
+      K.getRow(dof).forEach((val, col) => { Ku += val * result.x[col]; });
+      const reaction = Ku - Fapplied[dof];
+      const key = ['fx','fy','fz','mx','my','mz'][d];
+      rx[key] = reaction;
+    }
+    reactions.set(nid, rx);
+    sumRx += rx.fx; sumRy += rx.fy; sumRz += rx.fz;
+  });
 
   const t1=performance.now();
   let maxU=0,maxUz=0;
@@ -1462,7 +1538,7 @@ window.runFEM = async function() {
   let maxAxial=0,maxMoment=0;
   memberForces.forEach(mf=>{if(Math.abs(mf.axial)>Math.abs(maxAxial))maxAxial=mf.axial;if(mf.maxMoment>maxMoment)maxMoment=mf.maxMoment;});
 
-  femResults={displacements:result.x,memberForces,maxU,maxUz,maxAxial,maxMoment,sumRx,sumRy,sumRz,sumFz,iterations:result.iterations,residual:result.residual,solveTime:t1-t0};
+  femResults={displacements:result.x,memberForces,reactions,maxU,maxUz,maxAxial,maxMoment,sumRx,sumRy,sumRz,sumFz,iterations:result.iterations,residual:result.residual,solveTime:t1-t0};
 
   document.getElementById('r-iter').textContent=result.iterations;
   document.getElementById('r-resid').textContent=result.residual.toExponential(3);
