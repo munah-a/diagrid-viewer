@@ -4249,11 +4249,12 @@ def main():
         sec_data = sec_label.Data
 
         # Try loading from Robot's section database
+        # Robot DB uses format "CHS {D:.1f}x{t:.1f}" (e.g. "CHS 219.1x8.0")
         db_names = [
+            f"CHS {D_mm:.1f}x{t_mm:.1f}",
+            f"TRON {D_mm:.1f}*{t_mm:.1f}",
             f"CHS {D_mm:.0f}x{t_mm:.0f}",
             f"TRON {D_mm:.0f}*{t_mm:.0f}",
-            f"CHS {D_mm:.0f}*{t_mm:.0f}",
-            f"TRON {D_mm:.0f}x{t_mm:.0f}",
         ]
         loaded = False
         for db_name in db_names:
@@ -4268,7 +4269,7 @@ def main():
         if not loaded:
             print(f"  WARNING: Section {label_name} not found in Robot database")
             print(f"    Tried: {db_names}")
-            print(f"    CalcNonstdGeometry does not work via COM - section will use Robot default")
+            print(f"    Section will use Robot default properties")
 
         sec_data.MaterialName = mat_name
         labels.Store(sec_label)
