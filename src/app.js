@@ -134,6 +134,17 @@ let importedGeometries = []; // {name, group, visible}
 let geometryOpacity = 0.7;
 let geometryWireframe = false;
 
+// Connection detail visualization
+let connectionMode = false;
+const connectionParams = { sphereScale: 1.5, spliceOffsetFactor: 1.0, spliceRingWidth: 0.03, spliceRingThickness: 0.005 };
+const nodeConnectionData = new Map(); // nodeId -> {sphereRadius, maxD, sortedBeams}
+const nodeBeamIndices = new Map();    // nodeId -> [beamIndex, ...]
+const connectionGroup = new THREE.Group(); scene.add(connectionGroup);
+connectionGroup.visible = false;
+const connSphereGroup = new THREE.Group(); connectionGroup.add(connSphereGroup);
+const connStiffenerGroup = new THREE.Group(); connectionGroup.add(connStiffenerGroup);
+const connSpliceGroup = new THREE.Group(); connectionGroup.add(connSpliceGroup);
+
 // Load sub-groups for per-type visibility
 const loadSubGroups = { sw: new THREE.Group(), ll: new THREE.Group(), pl: new THREE.Group(), wl: new THREE.Group() };
 Object.values(loadSubGroups).forEach(g => loadGroup.add(g));
@@ -496,6 +507,14 @@ function clearScene() {
   connectionData = [];
   resetMemberGroups();
   femResults = null;
+  // Connection detail cleanup
+  nodeConnectionData.clear();
+  nodeBeamIndices.clear();
+  connectionMode = false;
+  clearConnectionGeometry();
+  connectionGroup.visible = false;
+  const connBtn = document.getElementById('btn-connections');
+  if (connBtn) connBtn.classList.remove('active');
 }
 
 function rebuildScene() {
@@ -514,12 +533,14 @@ function rebuildScene() {
   nodes.forEach(n => nodeMap.set(n.id, n));
   nodes.forEach((n, i) => nIdx.set(n.id, i));
 
-  // Recompute degree
-  nodes.forEach(n => degree.set(n.id, 0));
-  beams.forEach(b => {
+  // Recompute degree and beam-to-node index
+  nodes.forEach(n => { degree.set(n.id, 0); nodeBeamIndices.set(n.id, []); });
+  beams.forEach((b, bi) => {
     if (!b) return;
     degree.set(b.node_start, (degree.get(b.node_start) || 0) + 1);
     degree.set(b.node_end, (degree.get(b.node_end) || 0) + 1);
+    nodeBeamIndices.get(b.node_start).push(bi);
+    nodeBeamIndices.get(b.node_end).push(bi);
   });
 
   // Recompute beam lengths
@@ -1274,6 +1295,7 @@ window.togglePhysicalTubes = function(btn) {
   btn.classList.toggle('active');
   physicalTubeMode = btn.classList.contains('active');
   rebuildAllBeamGeometry();
+  if (connectionMode) shortenBeamsForConnections();
 };
 
 window.applyBeamSection = function() {
@@ -2342,7 +2364,7 @@ renderer.domElement.addEventListener('click', e => {
 // DISPLAY CONTROLS
 // ============================================================
 window.toggleBeams = function(btn){btn.classList.toggle('active');beamGroup.visible=btn.classList.contains('active');};
-window.toggleNodes = function(btn){btn.classList.toggle('active');nodeGroup.visible=btn.classList.contains('active');};
+window.toggleNodes = function(btn){btn.classList.toggle('active');if(!connectionMode)nodeGroup.visible=btn.classList.contains('active');};
 window.toggleNodeLabels = function(btn){
   btn.classList.toggle('active');
   nlVisible = btn.classList.contains('active');
@@ -4247,6 +4269,235 @@ window.removeGeometry = function(idx) {
 
 window.clearAllGeometry = function() {
   while (importedGeometries.length > 0) window.removeGeometry(0);
+};
+
+// ============================================================
+// CONNECTION DETAIL VISUALIZATION
+// ============================================================
+const connSphereMat = new THREE.MeshPhongMaterial({ color: 0x8899aa, shininess: 60, transparent: true, opacity: 0.9 });
+const connStiffenerMat = new THREE.MeshPhongMaterial({ color: 0x667788, shininess: 30, transparent: true, opacity: 0.85, side: THREE.DoubleSide });
+const connSpliceMat = new THREE.MeshPhongMaterial({ color: 0x556677, shininess: 50, transparent: true, opacity: 0.9 });
+
+function clearConnectionGeometry() {
+  [connSphereGroup, connStiffenerGroup, connSpliceGroup].forEach(grp => {
+    while (grp.children.length) {
+      const m = grp.children[0]; grp.remove(m);
+      if (m.geometry) m.geometry.dispose();
+    }
+  });
+}
+
+function buildNodeConnectionData() {
+  nodeConnectionData.clear();
+  const sp = connectionParams;
+
+  nodes.forEach(n => {
+    const bis = nodeBeamIndices.get(n.id);
+    if (!bis || bis.length === 0) return;
+
+    // Collect connected beam info
+    let maxD = 0;
+    const connBeams = [];
+    for (const bi of bis) {
+      const b = beams[bi]; if (!b) continue;
+      const otherNodeId = b.node_start === n.id ? b.node_end : b.node_start;
+      const other = nodeMap.get(otherNodeId); if (!other) continue;
+      const dx = other.x - n.x, dy = other.y - n.y, dz = other.z - n.z;
+      const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (len < 1e-10) continue;
+      const props = getBeamSectionProps(bi);
+      if (props.D > maxD) maxD = props.D;
+      connBeams.push({ bi, dirX: dx / len, dirY: dy / len, dirZ: dz / len, radius: props.D / 2, otherNodeId, len });
+    }
+
+    const sphereRadius = (sp.sphereScale * maxD) / 2;
+
+    // Sort beams by angle around the node for stiffener plate placement
+    if (connBeams.length >= 2) {
+      // Compute average direction as tangent-plane normal
+      let avgX = 0, avgY = 0, avgZ = 0;
+      connBeams.forEach(cb => { avgX += cb.dirX; avgY += cb.dirY; avgZ += cb.dirZ; });
+      let avgLen = Math.sqrt(avgX * avgX + avgY * avgY + avgZ * avgZ);
+      // If directions mostly cancel out, use Z-up as fallback
+      if (avgLen < 0.1) { avgX = 0; avgY = 0; avgZ = 1; avgLen = 1; }
+      const nx = avgX / avgLen, ny = avgY / avgLen, nz = avgZ / avgLen;
+
+      // Build local tangent frame
+      let tx, ty, tz;
+      if (Math.abs(nz) < 0.9) {
+        // Cross with Z-up
+        tx = ny * 1 - nz * 0; ty = nz * 0 - nx * 1; tz = nx * 0 - ny * 0;
+      } else {
+        // Cross with X-right
+        tx = ny * 0 - nz * 0; ty = nz * 1 - nx * 0; tz = nx * 0 - ny * 1;
+      }
+      const tLen = Math.sqrt(tx * tx + ty * ty + tz * tz);
+      if (tLen > 1e-10) { tx /= tLen; ty /= tLen; tz /= tLen; }
+      // Second tangent = normal × tangent1
+      const t2x = ny * tz - nz * ty, t2y = nz * tx - nx * tz, t2z = nx * ty - ny * tx;
+
+      // Project each beam direction onto tangent plane and compute angle
+      connBeams.forEach(cb => {
+        const projU = cb.dirX * tx + cb.dirY * ty + cb.dirZ * tz;
+        const projV = cb.dirX * t2x + cb.dirY * t2y + cb.dirZ * t2z;
+        cb.angle = Math.atan2(projV, projU);
+      });
+      connBeams.sort((a, b) => a.angle - b.angle);
+    }
+
+    nodeConnectionData.set(n.id, { sphereRadius, maxD, sortedBeams: connBeams });
+  });
+}
+
+function buildConnectionGeometry() {
+  clearConnectionGeometry();
+  const sp = connectionParams;
+
+  nodeConnectionData.forEach((data, nid) => {
+    const n = nodeMap.get(nid);
+    const pos = m2t(n.x, n.y, n.z);
+
+    // --- Sphere ---
+    const sphereGeo = new THREE.SphereGeometry(data.sphereRadius, 16, 12);
+    const sphereMesh = new THREE.Mesh(sphereGeo, connSphereMat.clone());
+    sphereMesh.position.copy(pos);
+    connSphereGroup.add(sphereMesh);
+
+    // --- Stiffener plates between adjacent beam pairs ---
+    const sb = data.sortedBeams;
+    if (sb.length >= 2) {
+      for (let i = 0; i < sb.length; i++) {
+        const b1 = sb[i], b2 = sb[(i + 1) % sb.length];
+        // Points on sphere surface along each beam direction
+        const r = data.sphereRadius;
+        const p1 = m2t(n.x + b1.dirX * r, n.y + b1.dirY * r, n.z + b1.dirZ * r);
+        const p2 = m2t(n.x + b2.dirX * r, n.y + b2.dirY * r, n.z + b2.dirZ * r);
+        // Offset center point slightly outward for visibility
+        const midDirX = (b1.dirX + b2.dirX) / 2, midDirY = (b1.dirY + b2.dirY) / 2, midDirZ = (b1.dirZ + b2.dirZ) / 2;
+        const midLen = Math.sqrt(midDirX * midDirX + midDirY * midDirY + midDirZ * midDirZ);
+        const offR = midLen > 0.01 ? r * 0.3 : 0;
+        const pc = m2t(n.x + (midLen > 0.01 ? midDirX / midLen * offR : 0),
+                       n.y + (midLen > 0.01 ? midDirY / midLen * offR : 0),
+                       n.z + (midLen > 0.01 ? midDirZ / midLen * offR : 0));
+
+        const verts = new Float32Array([p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, pc.x, pc.y, pc.z]);
+        const triGeo = new THREE.BufferGeometry();
+        triGeo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+        triGeo.computeVertexNormals();
+        const triMesh = new THREE.Mesh(triGeo, connStiffenerMat);
+        connStiffenerGroup.add(triMesh);
+      }
+    }
+
+    // --- Splice rings on each beam ---
+    for (const cb of sb) {
+      const spliceOffset = sp.spliceOffsetFactor * data.sphereRadius * 2;
+      const ringPos = m2t(n.x + cb.dirX * spliceOffset, n.y + cb.dirY * spliceOffset, n.z + cb.dirZ * spliceOffset);
+      const ringRadius = cb.radius + sp.spliceRingThickness;
+      const ringGeo = new THREE.CylinderGeometry(ringRadius, ringRadius, sp.spliceRingWidth, 12, 1);
+      const ringMesh = new THREE.Mesh(ringGeo, connSpliceMat);
+      ringMesh.position.copy(ringPos);
+      // Orient ring along beam direction
+      const dir3 = m2t(cb.dirX, cb.dirY, cb.dirZ).normalize();
+      if (dir3.length() > 0.01) ringMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir3);
+      connSpliceGroup.add(ringMesh);
+    }
+  });
+}
+
+function shortenBeamsForConnections() {
+  beams.forEach((b, bi) => {
+    if (!b || !beamMeshes[bi]) return;
+    const mesh = beamMeshes[bi];
+    const n1 = nodeMap.get(b.node_start), n2 = nodeMap.get(b.node_end);
+    if (!n1 || !n2) return;
+
+    const d1 = nodeConnectionData.get(b.node_start);
+    const d2 = nodeConnectionData.get(b.node_end);
+    const pullStart = d1 ? d1.sphereRadius : 0;
+    const pullEnd = d2 ? d2.sphereRadius : 0;
+    const fullLen = beamLengths[bi];
+    const newLen = fullLen - pullStart - pullEnd;
+
+    if (newLen <= 0.01) { mesh.visible = false; return; }
+
+    // Direction from n1 to n2
+    const dx = n2.x - n1.x, dy = n2.y - n1.y, dz = n2.z - n1.z;
+    const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    const ux = dx / len, uy = dy / len, uz = dz / len;
+
+    // New start and end (pulled inward)
+    const sx = n1.x + ux * pullStart, sy = n1.y + uy * pullStart, sz = n1.z + uz * pullStart;
+    const ex = n2.x - ux * pullEnd, ey = n2.y - uy * pullEnd, ez = n2.z - uz * pullEnd;
+
+    // New midpoint
+    const mid = m2t((sx + ex) / 2, (sy + ey) / 2, (sz + ez) / 2);
+    mesh.position.copy(mid);
+
+    // Rebuild geometry with new length
+    const radius = physicalTubeMode ? getBeamRadius(bi) : Math.max(getBeamSectionProps(bi).D / 2 * 0.15, 0.03);
+    const segments = physicalTubeMode ? 12 : 4;
+    const oldGeo = mesh.geometry;
+    oldGeo.dispose();
+    mesh.geometry = new THREE.CylinderGeometry(radius, radius, newLen, segments, 1, physicalTubeMode);
+
+    // Ensure visibility (might have been hidden by group)
+    const grpName = beamGroupMap.get(bi) || 'Interior';
+    const grp = memberGroups.get(grpName);
+    mesh.visible = grp ? grp.visible : true;
+  });
+}
+
+function restoreBeamLengths() {
+  beams.forEach((b, bi) => {
+    if (!b || !beamMeshes[bi]) return;
+    const mesh = beamMeshes[bi];
+    const n1 = nodeMap.get(b.node_start), n2 = nodeMap.get(b.node_end);
+    if (!n1 || !n2) return;
+
+    const p1 = m2t(n1.x, n1.y, n1.z), p2 = m2t(n2.x, n2.y, n2.z);
+    const dir = new THREE.Vector3().subVectors(p2, p1);
+    const len = dir.length();
+    const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
+    mesh.position.copy(mid);
+    if (len > 1e-8) mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+
+    // Restore full-length geometry
+    const radius = physicalTubeMode ? getBeamRadius(bi) : Math.max(getBeamSectionProps(bi).D / 2 * 0.15, 0.03);
+    const segments = physicalTubeMode ? 12 : 4;
+    const oldGeo = mesh.geometry;
+    oldGeo.dispose();
+    mesh.geometry = new THREE.CylinderGeometry(radius, radius, len, segments, 1, physicalTubeMode);
+
+    // Restore group visibility
+    const grpName = beamGroupMap.get(bi) || 'Interior';
+    const grp = memberGroups.get(grpName);
+    mesh.visible = grp ? grp.visible : true;
+  });
+}
+
+window.toggleConnections = function(btn) {
+  btn.classList.toggle('active');
+  connectionMode = btn.classList.contains('active');
+
+  if (connectionMode) {
+    buildNodeConnectionData();
+    buildConnectionGeometry();
+    connectionGroup.visible = true;
+    nodeGroup.visible = false;
+    // Deactivate Nodes button visually
+    const nodesBtn = document.querySelectorAll('#controls .ctrl-btn');
+    nodesBtn.forEach(b => { if (b.textContent.trim() === 'Nodes') b.classList.remove('active'); });
+    shortenBeamsForConnections();
+  } else {
+    connectionGroup.visible = false;
+    clearConnectionGeometry();
+    nodeGroup.visible = true;
+    // Reactivate Nodes button visually
+    const nodesBtn = document.querySelectorAll('#controls .ctrl-btn');
+    nodesBtn.forEach(b => { if (b.textContent.trim() === 'Nodes') b.classList.add('active'); });
+    restoreBeamLengths();
+  }
 };
 
 // ============================================================
