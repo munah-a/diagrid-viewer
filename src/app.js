@@ -4984,7 +4984,6 @@ LOAD_CASES = ${toPy(lcData)}
 
 PANELS = ${toPy(envelopeData)}
 
-PANEL_THICKNESS = 0.008  # 8mm cladding panel thickness
 
 # ================================================================
 # ROBOT COM CONSTANTS (from Robot API PDF p68-69)
@@ -5002,8 +5001,6 @@ I_CAT_STATIC_LINEAR = 1
 I_LRT_NODE_FORCE = 0
 I_LRT_BAR_UNIFORM = 5
 I_LRT_DEAD = 7
-I_LT_PANEL_THICKNESS = 4  # IRobotLabelType for panel/slab thickness
-
 NATURE_MAP = {"dead": I_CN_PERMANENT, "live": I_CN_EXPLOATATION, "wind": I_CN_WIND, "custom": I_CN_ACCIDENTAL}
 
 SCRIPT_VERSION = "${ROBOT_SCRIPT_VERSION}"
@@ -5124,38 +5121,30 @@ def main():
             if errors <= 3: print(f"  Bar {rid} error: {e}")
     print(f"  Created {len(BEAMS) - errors}/{len(BEAMS)} bars")
 
-    # --- Cladding Panels (triangular FE elements) ---
+    # --- Cladding Panels (triangular) ---
     if PANELS:
         print(f"\\nCreating {len(PANELS)} cladding panels...")
-        # Create panel thickness label
-        th_name = f"e = {PANEL_THICKNESS*1000:.0f} mm"
-        try:
-            th_label = labels.Create(I_LT_PANEL_THICKNESS, th_name)
-            th_data = th_label.Data
-            th_data.ThicknessType = 0  # Constant thickness
-            th_data.ThicknessValue = PANEL_THICKNESS
-            labels.Store(th_label)
-            print(f"  Panel thickness: {th_name}")
-        except Exception as e:
-            print(f"  Panel thickness label warning: {e}")
-
         objs = struct.Objects
         panel_errors = 0
+        panel_ok = 0
         for panel in PANELS:
             pid = panel["id"] + 1 + len(BEAMS)  # Offset IDs past bars
             try:
                 n1 = node_id_map[panel["a"]]
                 n2 = node_id_map[panel["b"]]
                 n3 = node_id_map[panel["c"]]
-                pts = f"{n1} {n2} {n3}"
-                objs.CreateContour(pid, pts)
-                obj = objs.Get(pid)
-                obj.SetLabel(I_LT_PANEL_THICKNESS, th_name)
-                obj.SetLabel(I_LT_MATERIAL, mat_name)
+                # Create contour geometry for the triangular panel
+                contour = win32com.client.Dispatch("Robot.GeoContour")
+                contour.Initialize(3)  # 3-point polygon
+                contour.Set(1, n1)
+                contour.Set(2, n2)
+                contour.Set(3, n3)
+                objs.Create(pid, 2, contour)  # 2 = I_OT_PANEL
+                panel_ok += 1
             except Exception as e:
                 panel_errors += 1
-                if panel_errors <= 3: print(f"  Panel {pid} error: {e}")
-        print(f"  Created {len(PANELS) - panel_errors}/{len(PANELS)} panels")
+                if panel_errors <= 5: print(f"  Panel {pid} error: {e}")
+        print(f"  Created {panel_ok}/{len(PANELS)} panels ({panel_errors} errors)")
 
     # --- Supports ---
     print(f"Applying {len(SUPPORTS)} supports...")
