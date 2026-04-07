@@ -5140,6 +5140,7 @@ def main():
                 pts.Set(2, panel["bx"], panel["by"], panel["bz"])
                 pts.Set(3, panel["cx"], panel["cy"], panel["cz"])
                 objs.CreateContour(pid, pts)
+                objs.SetStructuralType(pid, 5)  # 5 = cladding
                 panel_ok += 1
             except Exception as e:
                 panel_errors += 1
