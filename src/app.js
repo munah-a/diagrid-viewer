@@ -2970,7 +2970,9 @@ function computeSDF(grid, envelope) {
   // Shell thickness: cells within this distance of the surface are solid
   // Use 1.5x the cell diagonal so the shell is at least 1 cell thick
   const cellDiag = Math.sqrt(grid.dx ** 2 + grid.dy ** 2 + grid.dz ** 2);
-  const shellThickness = Math.min(cellDiag * 1.5, avgLen * 0.5);
+  const validLens = beamLengths.filter(l => l > 0);
+  const avgBeamLen = validLens.length > 0 ? validLens.reduce((s, l) => s + l, 0) / validLens.length : 1;
+  const shellThickness = Math.min(cellDiag * 1.5, avgBeamLen * 0.5);
 
   // Adaptive spatial hash — scale to structure size
   const hashSize = Math.max(grid.dx, grid.dy, grid.dz) * 5;
@@ -3135,11 +3137,6 @@ self.onmessage = function(e) {
       for (let i = 0; i < nx; i++) for (let kk = 0; kk < nz; kk++) {
         field[idx(i, yOutlet, kk)] = 0;
       }
-    }
-        if (bcType === 'vel_v') { field[idx(i, 0, kk)] = 0; field[idx(i, ny - 1, kk)] = 0; }
-        else { field[idx(i, 0, kk)] = field[idx(i, 1, kk)]; field[idx(i, ny - 1, kk)] = field[idx(i, ny - 2, kk)]; }
-      }
-      if (jOut >= 0) { field[idx(i, jOut, kk)] = field[idx(i, Math.max(0, Math.min(ny-1, jOut + (dirSign > 0 ? -1 : 1))), kk)]; }
     }
     // Z boundaries (ground=no-slip, top=slip)
     for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) {
