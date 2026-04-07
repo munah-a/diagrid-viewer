@@ -97,6 +97,7 @@ let tableSortCol = 0;
 let tableSortDir = 1; // 1=asc, -1=desc
 let newMemberNodes = [];
 const beamSections = new Map(); // beamIndex -> {D, t} per-beam overrides (highest priority)
+let physicalTubeMode = false; // true = render beams at real CHS diameter
 
 // Member groups — section/FEM/visibility per group
 const FIXED_GROUPS = ['Interior', 'Perimeter', 'Key Chords'];
@@ -538,8 +539,11 @@ function rebuildScene() {
     const dir = new THREE.Vector3().subVectors(p2, p1);
     const len = dir.length();
     const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
-    const geo = new THREE.CylinderGeometry(0.04, 0.04, len, 4, 1);
+    const radius = physicalTubeMode ? getBeamRadius(i) : 0.04;
+    const segments = physicalTubeMode ? 12 : 4;
+    const geo = new THREE.CylinderGeometry(radius, radius, len, segments, 1, physicalTubeMode);
     const mat = baseMat.clone();
+    if (physicalTubeMode) { mat.opacity = 0.95; }
     const mesh = new THREE.Mesh(geo, mat);
     mesh.position.copy(mid);
     if (len > 1e-8) mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
@@ -1233,17 +1237,44 @@ window.deletePointLoad = function(nid) {
 // ============================================================
 // PER-BEAM SECTION & PERIMETER BEAMS (Features 3, 5)
 // ============================================================
+function getBeamRadius(bi) {
+  const props = getBeamSectionProps(bi);
+  return props.D / 2; // real radius in meters
+}
+
 function updateBeamVisualRadius(bi) {
   const mesh = beamMeshes[bi];
   if (!mesh) return;
-  const props = getBeamSectionProps(bi);
-  const D = props.D; // already in meters
-  const radius = D / 2 * 0.5;
+  const h = mesh.geometry.parameters ? mesh.geometry.parameters.height : beamLengths[bi];
   const oldGeo = mesh.geometry;
-  const h = oldGeo.parameters ? oldGeo.parameters.height : beamLengths[bi];
   oldGeo.dispose();
-  mesh.geometry = new THREE.CylinderGeometry(Math.max(radius * 0.3, 0.03), Math.max(radius * 0.3, 0.03), h, 4, 1);
+  if (physicalTubeMode) {
+    const r = getBeamRadius(bi);
+    mesh.geometry = new THREE.CylinderGeometry(r, r, h, 12, 1, true);
+  } else {
+    const props = getBeamSectionProps(bi);
+    const r = Math.max(props.D / 2 * 0.15, 0.03);
+    mesh.geometry = new THREE.CylinderGeometry(r, r, h, 4, 1);
+  }
 }
+
+function rebuildAllBeamGeometry() {
+  beams.forEach((b, bi) => {
+    if (!b || !beamMeshes[bi]) return;
+    updateBeamVisualRadius(bi);
+    if (physicalTubeMode) {
+      beamMeshes[bi].material.opacity = 0.95;
+    } else {
+      beamMeshes[bi].material.opacity = 0.85;
+    }
+  });
+}
+
+window.togglePhysicalTubes = function(btn) {
+  btn.classList.toggle('active');
+  physicalTubeMode = btn.classList.contains('active');
+  rebuildAllBeamGeometry();
+};
 
 window.applyBeamSection = function() {
   if (selectedBeamIdx === null) return;
