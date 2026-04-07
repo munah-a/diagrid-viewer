@@ -589,6 +589,11 @@ else:
       <option value="python">Python (pywin32)</option>
     </select>
   </div>
+  <div style="margin-bottom:6px;">
+    <label style="font-size:10px;color:#aac;display:flex;align-items:center;gap:4px;cursor:pointer;">
+      <input type="checkbox" id="robot-include-panels" checked style="margin:0;"> Include cladding panels (triangulated rhombuses)
+    </label>
+  </div>
   <button class="action-btn success" onclick="exportToRobot()">Download Robot Script</button>
   <button class="help-btn" onclick="showHelpModal('robot')" style="margin-left:6px;vertical-align:middle;">Setup Guide</button>
   <button class="action-btn" onclick="exportRobotJSON()" style="margin-top:4px;">Export JSON (for C# Add-in)</button>
