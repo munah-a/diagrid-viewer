@@ -218,7 +218,27 @@ else:
     <button class="ctrl-btn" onclick="setMatPreset('steel')">Steel S355</button>
     <button class="ctrl-btn" onclick="setMatPreset('aluminum')">Aluminum 6061</button>
   </div>
-  <div class="section-title">Per-Member Override</div>
+  <div class="section-title">Member Groups</div>
+  <p style="font-size:9px;color:#666;margin-bottom:4px;">Groups control section, FEM inclusion, and visibility. Click icons to toggle.</p>
+  <div id="group-list" style="margin-bottom:6px;"></div>
+  <div id="group-section-edit" style="display:none;background:rgba(20,25,45,0.7);border-radius:5px;padding:8px;margin-bottom:6px;">
+    <div style="font-size:10px;color:#adf;margin-bottom:4px;">Section for: <span id="group-section-name">--</span></div>
+    <div class="input-row">
+      <div class="input-group"><label>D (mm)</label><input type="number" id="group-section-D" step="0.1" min="10" placeholder="global"></div>
+      <div class="input-group"><label>t (mm)</label><input type="number" id="group-section-t" step="0.1" min="1" placeholder="global"></div>
+    </div>
+    <div style="display:flex;gap:4px;">
+      <button class="action-btn" onclick="applyGroupSection()" style="flex:1;">Apply</button>
+      <button class="action-btn danger" onclick="resetGroupSection()" style="flex:1;">Use Global</button>
+    </div>
+  </div>
+  <div style="display:flex;gap:4px;align-items:end;">
+    <div class="input-group" style="flex:1;margin:0;"><label>New Group</label><input type="text" id="new-group-name" placeholder="Group name" style="font-size:10px;"></div>
+    <div class="input-group" style="width:40px;margin:0;"><label>Color</label><input type="color" id="new-group-color" value="#44ddff" style="padding:1px 2px;height:26px;"></div>
+    <button class="ctrl-btn" onclick="createMemberGroup(document.getElementById('new-group-name').value, document.getElementById('new-group-color').value);document.getElementById('new-group-name').value='';" style="padding:5px 8px;margin-bottom:0;">+</button>
+  </div>
+
+  <div class="section-title">Per-Beam Override</div>
   <div id="member-edit-section" style="display:none;">
     <div style="font-size:11px;color:#adf;margin-bottom:6px;" id="edit-beam-label">Beam #--</div>
     <div class="input-row">
@@ -228,32 +248,27 @@ else:
     <button class="action-btn" onclick="applyBeamSection()">Apply to Beam</button>
     <button class="action-btn" onclick="resetBeamSection()">Reset to Global</button>
   </div>
-  <p style="font-size:10px;color:#666;">Click a beam to edit its section. Shift+click to toggle perimeter.</p>
-  <div class="section-title">Perimeter Beams</div>
-  <p style="font-size:10px;color:#666;margin-bottom:6px;">Click a beam to add/remove it from the perimeter set.</p>
-  <div style="display:flex;gap:4px;margin-bottom:6px;">
-    <button class="ctrl-btn" onclick="autoDetectPerimeter()" style="flex:1;text-align:center;">Auto-Detect</button>
-    <button class="ctrl-btn" onclick="clearPerimeterSelection()" style="flex:1;text-align:center;">Clear Selection</button>
-  </div>
-  <div class="input-row">
-    <div class="input-group"><label>D (mm)</label><input type="number" id="perim-D" value="323.9" step="0.1" min="10"></div>
-    <div class="input-group"><label>t (mm)</label><input type="number" id="perim-t" value="10" step="0.1" min="1"></div>
-  </div>
-  <button class="action-btn" onclick="applyPerimeterSection()">Apply to Perimeter</button>
-  <button class="action-btn danger" onclick="clearPerimeterSection()">Reset Perimeter</button>
-  <div id="perim-count" style="font-size:10px;color:#778;margin-top:4px;"></div>
-
-  <div class="section-title">Member Groups</div>
-  <div id="group-list" style="margin-bottom:6px;"></div>
-  <div style="display:flex;gap:4px;align-items:end;">
-    <div class="input-group" style="flex:1;margin:0;"><label>Name</label><input type="text" id="new-group-name" placeholder="Group name" style="font-size:10px;"></div>
-    <div class="input-group" style="width:40px;margin:0;"><label>Color</label><input type="color" id="new-group-color" value="#44ddff" style="padding:1px 2px;height:26px;"></div>
-    <button class="ctrl-btn" onclick="createMemberGroup(document.getElementById('new-group-name').value, document.getElementById('new-group-color').value);document.getElementById('new-group-name').value='';" style="padding:5px 8px;margin-bottom:0;">+</button>
-  </div>
+  <p style="font-size:10px;color:#666;">Click a beam to edit its section or Shift+click to toggle perimeter.</p>
   <div id="beam-group-assign" style="display:none;margin-top:8px;">
     <div class="input-group"><label>Assign selected beam to group</label>
       <select id="beam-group-select" onchange="assignSelectedBeamGroup(this.value)" style="font-size:11px;"></select>
     </div>
+  </div>
+
+  <div class="section-title">Perimeter (Legacy)</div>
+  <div id="perim-legacy-section">
+    <p style="font-size:9px;color:#666;margin-bottom:4px;">For legacy models without pre-classified perimeter.</p>
+    <div style="display:flex;gap:4px;margin-bottom:6px;">
+      <button class="ctrl-btn" onclick="autoDetectPerimeter()" style="flex:1;text-align:center;">Auto-Detect</button>
+      <button class="ctrl-btn" onclick="clearPerimeterSelection()" style="flex:1;text-align:center;">Clear</button>
+    </div>
+    <div class="input-row">
+      <div class="input-group"><label>D (mm)</label><input type="number" id="perim-D" value="323.9" step="0.1" min="10"></div>
+      <div class="input-group"><label>t (mm)</label><input type="number" id="perim-t" value="10" step="0.1" min="1"></div>
+    </div>
+    <button class="action-btn" onclick="applyPerimeterSection()">Apply to Perimeter</button>
+    <button class="action-btn danger" onclick="clearPerimeterSection()">Reset Perimeter</button>
+    <div id="perim-count" style="font-size:10px;color:#778;margin-top:4px;"></div>
   </div>
 </div>
 

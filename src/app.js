@@ -5,52 +5,22 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 // ============================================================
 // DATA LOADING & BASIC ANALYSIS
 // ============================================================
-const resp = await fetch('./beam_model.json');
+const resp = await fetch('./diagrid.json');
 const model = await resp.json();
-const { nodes, beams } = model;
+let nodes = [];
+let beams = [];
 
 const nodeMap = new Map();
-nodes.forEach(n => nodeMap.set(n.id, n));
-const nIdx = new Map(); nodes.forEach((n,i) => nIdx.set(n.id, i));
-
+const nIdx = new Map();
 let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity, minZ=Infinity, maxZ=-Infinity;
 let cx=0, cy=0, cz=0;
-nodes.forEach(n => {
-  minX=Math.min(minX,n.x); maxX=Math.max(maxX,n.x);
-  minY=Math.min(minY,n.y); maxY=Math.max(maxY,n.y);
-  minZ=Math.min(minZ,n.z); maxZ=Math.max(maxZ,n.z);
-  cx+=n.x; cy+=n.y; cz+=n.z;
-});
-cx/=nodes.length; cy/=nodes.length; cz/=nodes.length;
-
 const degree = new Map();
-nodes.forEach(n => degree.set(n.id, 0));
-beams.forEach(b => {
-  degree.set(b.node_start, (degree.get(b.node_start)||0)+1);
-  degree.set(b.node_end, (degree.get(b.node_end)||0)+1);
-});
+const beamLengths = [];
 
-const beamLengths = beams.map(b => {
-  const a = nodeMap.get(b.node_start), e = nodeMap.get(b.node_end);
-  return Math.sqrt((a.x-e.x)**2 + (a.y-e.y)**2 + (a.z-e.z)**2);
-});
-const avgLen = beamLengths.reduce((s,l)=>s+l,0)/beamLengths.length;
-const minLen = Math.min(...beamLengths);
-const maxLen = Math.max(...beamLengths);
-const totLen = beamLengths.reduce((s,l)=>s+l,0);
-
-document.getElementById('s-nodes').textContent = nodes.length;
-document.getElementById('s-beams').textContent = beams.length;
-document.getElementById('s-spanx').textContent = (maxX-minX).toFixed(1);
-document.getElementById('s-height').textContent = (maxZ-minZ).toFixed(1);
-document.getElementById('d-xrange').textContent = `[${minX.toFixed(1)}, ${maxX.toFixed(1)}]`;
-document.getElementById('d-yrange').textContent = `[${minY.toFixed(1)}, ${maxY.toFixed(1)}]`;
-document.getElementById('d-zrange').textContent = `[${minZ.toFixed(1)}, ${maxZ.toFixed(1)}]`;
-document.getElementById('d-centroid').textContent = `(${cx.toFixed(1)}, ${cy.toFixed(1)}, ${cz.toFixed(1)})`;
-document.getElementById('d-avglen').textContent = avgLen.toFixed(3) + ' m';
-document.getElementById('d-minmaxlen').textContent = `${minLen.toFixed(3)} / ${maxLen.toFixed(3)} m`;
-document.getElementById('d-totlen').textContent = totLen.toFixed(1) + ' m';
-document.getElementById('d-dof').textContent = nodes.length * 6;
+// Row/topology metadata from diagrid JSON
+const nodeRowMap = new Map();   // nodeId -> rowIndex
+let rowData = [];               // full rows array from diagrid JSON
+let connectionData = [];        // connections array from diagrid JSON
 
 // ============================================================
 // THREE.JS SCENE
@@ -100,37 +70,11 @@ const nlDivs = [], blDivs = [];
 const beamMeshes = [];
 const baseMat = new THREE.MeshPhongMaterial({ color: defaultBeamColor, shininess: 30, transparent: true, opacity: 0.85 });
 
-beams.forEach((b, i) => {
-  const ns = nodeMap.get(b.node_start), ne = nodeMap.get(b.node_end);
-  if (!ns||!ne) return;
-  const p1 = m2t(ns.x, ns.y, ns.z), p2 = m2t(ne.x, ne.y, ne.z);
-  const dir = new THREE.Vector3().subVectors(p2, p1);
-  const len = dir.length();
-  const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
-  const geo = new THREE.CylinderGeometry(0.04, 0.04, len, 4, 1);
-  const mat = baseMat.clone();
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.position.copy(mid);
-  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), dir.normalize());
-  mesh.userData = { type:'beam', id:b.id, si:b.node_start, ei:b.node_end, length:beamLengths[i] };
-  beamMeshes.push(mesh);
-  beamGroup.add(mesh);
-});
+// Meshes are created by loadModel() after scene initialization
 
 const nodeMeshes = [];
 const nodeIdToMeshIdx = new Map();
 const sphereGeo = new THREE.SphereGeometry(0.12, 8, 6);
-
-nodes.forEach((n, idx) => {
-  const mat = new THREE.MeshPhongMaterial({ color: defaultNodeColor, shininess: 60, transparent: true, opacity: 0.9 });
-  const mesh = new THREE.Mesh(sphereGeo, mat);
-  const pos = m2t(n.x, n.y, n.z);
-  mesh.position.copy(pos);
-  mesh.userData = { type:'node', id:n.id, x:n.x, y:n.y, z:n.z, degree:degree.get(n.id) };
-  nodeMeshes.push(mesh);
-  nodeIdToMeshIdx.set(n.id, idx);
-  nodeGroup.add(mesh);
-});
 
 // ============================================================
 // STATE
@@ -149,14 +93,14 @@ let currentTableTab = 'nodes';
 let tableSortCol = 0;
 let tableSortDir = 1; // 1=asc, -1=desc
 let newMemberNodes = [];
-const beamSections = new Map(); // beamIndex -> {D, t} overrides
-const perimeterSet = new Set(); // beam indices marked as perimeter
+const beamSections = new Map(); // beamIndex -> {D, t} per-beam overrides (highest priority)
 
-// Member groups
+// Member groups — section/FEM/visibility per group
+const FIXED_GROUPS = ['Interior', 'Perimeter', 'Key Chords'];
 const memberGroups = new Map([
-  ['Default',       { color: '#5a8de6', beamIndices: new Set() }],
-  ['Perimeter',     { color: '#ffaa44', beamIndices: new Set() }],
-  ['Cross-Section', { color: '#66ff88', beamIndices: new Set() }],
+  ['Interior',      { color: '#5a8de6', beamIndices: new Set(), section: null, includeInFEM: true, visible: true }],
+  ['Perimeter',     { color: '#ffaa44', beamIndices: new Set(), section: { D: 323.9, t: 10 }, includeInFEM: true, visible: true }],
+  ['Key Chords',    { color: '#66ff88', beamIndices: new Set(), section: null, includeInFEM: true, visible: true }],
 ]);
 const beamGroupMap = new Map(); // beamIndex -> group name
 let groupColoringEnabled = true;
@@ -193,8 +137,8 @@ Object.values(loadSubGroups).forEach(g => loadGroup.add(g));
 // MEMBER GROUP FUNCTIONS
 // ============================================================
 function getBeamGroupColor(bi) {
-  const name = beamGroupMap.get(bi) || 'Default';
-  const grp = memberGroups.get(name) || memberGroups.get('Default');
+  const name = beamGroupMap.get(bi) || 'Interior';
+  const grp = memberGroups.get(name) || memberGroups.get('Interior');
   return new THREE.Color(grp.color);
 }
 
@@ -215,28 +159,26 @@ function applyAllGroupColors() {
 
 function assignBeamToGroup(bi, groupName) {
   // Remove from old group
-  const oldName = beamGroupMap.get(bi) || 'Default';
+  const oldName = beamGroupMap.get(bi) || 'Interior';
   const oldGrp = memberGroups.get(oldName);
   if (oldGrp) oldGrp.beamIndices.delete(bi);
   // Add to new group
-  if (groupName === 'Default') {
-    beamGroupMap.delete(bi);
-  } else {
-    beamGroupMap.set(bi, groupName);
-  }
+  beamGroupMap.set(bi, groupName);
   const newGrp = memberGroups.get(groupName);
-  if (newGrp && groupName !== 'Default') newGrp.beamIndices.add(bi);
+  if (newGrp) newGrp.beamIndices.add(bi);
   applyGroupColorToBeam(bi);
+  // Respect group visibility
+  if (beamMeshes[bi] && newGrp) beamMeshes[bi].visible = newGrp.visible;
 }
 
 window.createMemberGroup = function(name, hexColor) {
   if (!name || memberGroups.has(name)) return;
-  memberGroups.set(name, { color: hexColor || '#ffffff', beamIndices: new Set() });
+  memberGroups.set(name, { color: hexColor || '#ffffff', beamIndices: new Set(), section: null, includeInFEM: true, visible: true });
   updateGroupUI();
 };
 
 window.deleteMemberGroup = function(name) {
-  if (name === 'Default' || !memberGroups.has(name)) return;
+  if (FIXED_GROUPS.includes(name) || !memberGroups.has(name)) return;
   const grp = memberGroups.get(name);
   grp.beamIndices.forEach(bi => {
     beamGroupMap.delete(bi);
@@ -257,18 +199,99 @@ function updateGroupUI() {
   if (!list) return;
   list.innerHTML = '';
   memberGroups.forEach((grp, name) => {
-    const count = name === 'Default'
-      ? beams.filter((b, i) => b && !beamGroupMap.has(i)).length
+    const count = name === 'Interior'
+      ? beams.filter((b, i) => b && !beamGroupMap.has(i)).length + grp.beamIndices.size
       : grp.beamIndices.size;
+    const secLabel = grp.section ? `CHS ${grp.section.D}x${grp.section.t}` : 'Global';
     const row = document.createElement('div');
-    row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:5px;background:rgba(30,35,55,0.5);margin-bottom:3px;';
-    row.innerHTML = `<span style="width:12px;height:12px;border-radius:2px;background:${grp.color};flex-shrink:0;"></span>
-      <span style="flex:1;font-size:10px;color:#cce;">${name}</span>
-      <span style="font-size:9px;color:#778;font-family:monospace;">${count}</span>
-      ${name !== 'Default' ? `<button onclick="deleteMemberGroup('${name}')" style="background:none;border:none;color:#866;cursor:pointer;font-size:11px;padding:0 2px;">\u2715</button>` : ''}`;
+    row.style.cssText = 'display:flex;flex-direction:column;gap:3px;padding:6px;border-radius:5px;background:rgba(30,35,55,0.5);margin-bottom:4px;';
+    row.innerHTML = `
+      <div style="display:flex;align-items:center;gap:5px;">
+        <span style="width:12px;height:12px;border-radius:2px;background:${grp.color};flex-shrink:0;"></span>
+        <span style="flex:1;font-size:10px;color:#cce;font-weight:600;">${name}</span>
+        <span style="font-size:9px;color:#778;font-family:monospace;">${count}</span>
+        <button onclick="toggleGroupFEM('${name}')" title="Include in FEM" style="background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px;color:${grp.includeInFEM ? '#4f8' : '#644'};">${grp.includeInFEM ? '\u2713' : '\u2717'}</button>
+        <button onclick="toggleGroupVisibility('${name}')" title="Visibility" style="background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px;color:${grp.visible ? '#adf' : '#644'};">${grp.visible ? '\u{1F441}' : '\u{1F441}\u{200D}\u{1F5E8}'}</button>
+        ${!FIXED_GROUPS.includes(name) ? `<button onclick="deleteMemberGroup('${name}')" style="background:none;border:none;color:#866;cursor:pointer;font-size:11px;padding:0 2px;">\u2715</button>` : ''}
+      </div>
+      <div style="display:flex;align-items:center;gap:4px;font-size:9px;color:#889;">
+        <span>Section: ${secLabel}</span>
+        <button onclick="editGroupSection('${name}')" style="background:none;border:none;cursor:pointer;font-size:9px;color:#8af;padding:0;">edit</button>
+      </div>`;
     list.appendChild(row);
   });
 }
+
+window.toggleGroupFEM = function(name) {
+  const grp = memberGroups.get(name);
+  if (!grp) return;
+  grp.includeInFEM = !grp.includeInFEM;
+  updateGroupUI();
+};
+
+window.toggleGroupVisibility = function(name) {
+  const grp = memberGroups.get(name);
+  if (!grp) return;
+  grp.visible = !grp.visible;
+  setGroupVisibility(name, grp.visible);
+  updateGroupUI();
+};
+
+function setGroupVisibility(groupName, visible) {
+  const grp = memberGroups.get(groupName);
+  if (!grp) return;
+  grp.beamIndices.forEach(bi => {
+    if (beamMeshes[bi]) beamMeshes[bi].visible = visible;
+  });
+  // For Interior, also handle unassigned beams
+  if (groupName === 'Interior') {
+    beams.forEach((b, bi) => {
+      if (!b || !beamMeshes[bi]) return;
+      if (!beamGroupMap.has(bi)) beamMeshes[bi].visible = visible;
+    });
+  }
+}
+
+window.editGroupSection = function(name) {
+  const grp = memberGroups.get(name);
+  if (!grp) return;
+  const editDiv = document.getElementById('group-section-edit');
+  if (!editDiv) return;
+  editDiv.style.display = '';
+  document.getElementById('group-section-name').textContent = name;
+  document.getElementById('group-section-D').value = grp.section ? grp.section.D : '';
+  document.getElementById('group-section-t').value = grp.section ? grp.section.t : '';
+  editDiv.dataset.groupName = name;
+};
+
+window.applyGroupSection = function() {
+  const editDiv = document.getElementById('group-section-edit');
+  const name = editDiv.dataset.groupName;
+  const grp = memberGroups.get(name);
+  if (!grp) return;
+  const D = parseFloat(document.getElementById('group-section-D').value);
+  const t = parseFloat(document.getElementById('group-section-t').value);
+  if (D > 0 && t > 0) {
+    grp.section = { D, t };
+  } else {
+    grp.section = null;
+  }
+  // Update visual radii for all beams in this group
+  grp.beamIndices.forEach(bi => updateBeamVisualRadius(bi));
+  editDiv.style.display = 'none';
+  updateGroupUI();
+};
+
+window.resetGroupSection = function() {
+  const editDiv = document.getElementById('group-section-edit');
+  const name = editDiv.dataset.groupName;
+  const grp = memberGroups.get(name);
+  if (!grp) return;
+  grp.section = null;
+  grp.beamIndices.forEach(bi => updateBeamVisualRadius(bi));
+  editDiv.style.display = 'none';
+  updateGroupUI();
+};
 
 window.assignSelectedBeamGroup = function(groupName) {
   if (selectedBeamIdx === null) return;
@@ -281,7 +304,7 @@ function showBeamGroupAssign(bi) {
   const sel = document.getElementById('beam-group-select');
   container.style.display = '';
   sel.innerHTML = '';
-  const current = beamGroupMap.get(bi) || 'Default';
+  const current = beamGroupMap.get(bi) || 'Interior';
   memberGroups.forEach((grp, name) => {
     const opt = document.createElement('option');
     opt.value = name; opt.textContent = name;
@@ -329,6 +352,286 @@ window.setMatPreset = function(name) {
   }
   document.getElementById('mat-G').value = '';
 };
+
+// ============================================================
+// JSON FORMAT DETECTION & PARSING
+// ============================================================
+function detectJSONFormat(data) {
+  if (data.rows && data.lines) return 'diagrid';
+  if (data.nodes && data.beams) return 'legacy';
+  return null;
+}
+
+function parseDiagridJSON(data) {
+  const parsedNodes = [];
+  const parsedNodeRowMap = new Map();
+
+  // Build nodes from rows
+  for (const row of data.rows) {
+    for (let li = 0; li < row.point_count; li++) {
+      const id = row.point_indices[li];
+      const [x, y, z] = row.coords[li];
+      parsedNodes.push({ id, x, y, z, row: row.index });
+      parsedNodeRowMap.set(id, row.index);
+    }
+  }
+
+  // Build coordinate lookup map (key = rounded coords)
+  const coordToId = new Map();
+  for (const n of parsedNodes) {
+    const key = `${n.x.toFixed(4)},${n.y.toFixed(4)},${n.z.toFixed(4)}`;
+    coordToId.set(key, n.id);
+  }
+
+  function findNodeId(coords) {
+    const key = `${coords[0].toFixed(4)},${coords[1].toFixed(4)},${coords[2].toFixed(4)}`;
+    const id = coordToId.get(key);
+    if (id !== undefined) return id;
+    // Tolerance fallback
+    const tol = 1e-3;
+    for (const n of parsedNodes) {
+      if (Math.abs(n.x - coords[0]) < tol && Math.abs(n.y - coords[1]) < tol && Math.abs(n.z - coords[2]) < tol) {
+        return n.id;
+      }
+    }
+    return null;
+  }
+
+  // Build beams from lines, tracking group assignments
+  const parsedBeams = [];
+  const groups = { interior: new Set(), perimeter: new Set(), keyChords: new Set() };
+  let beamId = 0;
+
+  for (const [category, lineArr] of [['interior', data.lines.interior], ['perimeter', data.lines.perimeter], ['keyChords', data.lines.key_chords]]) {
+    if (!lineArr) continue;
+    for (const line of lineArr) {
+      const nStart = findNodeId(line.start);
+      const nEnd = findNodeId(line.end);
+      if (nStart === null || nEnd === null) continue;
+      const bi = parsedBeams.length;
+      parsedBeams.push({ id: beamId++, node_start: nStart, node_end: nEnd });
+      groups[category].add(bi);
+    }
+  }
+
+  return {
+    nodes: parsedNodes,
+    beams: parsedBeams,
+    groupAssignments: groups,
+    nodeRowMap: parsedNodeRowMap,
+    rowData: data.rows,
+    connectionData: data.connections || []
+  };
+}
+
+function resetMemberGroups() {
+  memberGroups.forEach(g => g.beamIndices.clear());
+  // Ensure the 3 fixed groups exist with defaults
+  if (!memberGroups.has('Interior'))
+    memberGroups.set('Interior', { color: '#5a8de6', beamIndices: new Set(), section: null, includeInFEM: true, visible: true });
+  if (!memberGroups.has('Perimeter'))
+    memberGroups.set('Perimeter', { color: '#ffaa44', beamIndices: new Set(), section: { D: 323.9, t: 10 }, includeInFEM: true, visible: true });
+  if (!memberGroups.has('Key Chords'))
+    memberGroups.set('Key Chords', { color: '#66ff88', beamIndices: new Set(), section: null, includeInFEM: true, visible: true });
+  // Remove any user-created groups
+  for (const name of memberGroups.keys()) {
+    if (!FIXED_GROUPS.includes(name)) memberGroups.delete(name);
+  }
+}
+
+// ============================================================
+// SECTION RESOLUTION (per-beam > group > global)
+// ============================================================
+function getBeamSectionProps(bi) {
+  let Dmm, tmm;
+  // Priority 1: per-beam override
+  if (beamSections.has(bi)) {
+    const bs = beamSections.get(bi);
+    Dmm = bs.D; tmm = bs.t;
+  } else {
+    // Priority 2: group section
+    const grpName = beamGroupMap.get(bi) || 'Interior';
+    const grp = memberGroups.get(grpName);
+    if (grp && grp.section) {
+      Dmm = grp.section.D; tmm = grp.section.t;
+    } else {
+      // Priority 3: global CHS
+      return getCHSProps();
+    }
+  }
+  const Do = Dmm / 1000, Di = Do - 2 * tmm / 1000;
+  const A = Math.PI / 4 * (Do * Do - Di * Di);
+  const I = Math.PI / 64 * (Do ** 4 - Di ** 4);
+  const J = Math.PI / 32 * (Do ** 4 - Di ** 4);
+  return { A, Iy: I, Iz: I, J, D: Do, t: tmm / 1000 };
+}
+
+// ============================================================
+// SCENE CLEAR & REBUILD
+// ============================================================
+function clearScene() {
+  while (beamGroup.children.length) { const m = beamGroup.children[0]; beamGroup.remove(m); m.geometry.dispose(); m.material.dispose(); }
+  while (nodeGroup.children.length) { const m = nodeGroup.children[0]; nodeGroup.remove(m); m.geometry.dispose(); m.material.dispose(); }
+  beamMeshes.length = 0;
+  nodeMeshes.length = 0;
+  nodeIdToMeshIdx.clear();
+  nodeMap.clear();
+  nIdx.clear();
+  degree.clear();
+  beamLengths.length = 0;
+  supports.clear();
+  pointLoads.clear();
+  beamSections.clear();
+  beamGroupMap.clear();
+  nodeRowMap.clear();
+  rowData = [];
+  connectionData = [];
+  resetMemberGroups();
+  femResults = null;
+}
+
+function rebuildScene() {
+  // Recompute bounds & centroid
+  minX = Infinity; maxX = -Infinity; minY = Infinity; maxY = -Infinity; minZ = Infinity; maxZ = -Infinity;
+  cx = 0; cy = 0; cz = 0;
+  nodes.forEach(n => {
+    minX = Math.min(minX, n.x); maxX = Math.max(maxX, n.x);
+    minY = Math.min(minY, n.y); maxY = Math.max(maxY, n.y);
+    minZ = Math.min(minZ, n.z); maxZ = Math.max(maxZ, n.z);
+    cx += n.x; cy += n.y; cz += n.z;
+  });
+  if (nodes.length > 0) { cx /= nodes.length; cy /= nodes.length; cz /= nodes.length; }
+
+  // Rebuild indices
+  nodes.forEach(n => nodeMap.set(n.id, n));
+  nodes.forEach((n, i) => nIdx.set(n.id, i));
+
+  // Recompute degree
+  nodes.forEach(n => degree.set(n.id, 0));
+  beams.forEach(b => {
+    if (!b) return;
+    degree.set(b.node_start, (degree.get(b.node_start) || 0) + 1);
+    degree.set(b.node_end, (degree.get(b.node_end) || 0) + 1);
+  });
+
+  // Recompute beam lengths
+  beamLengths.length = 0;
+  beams.forEach(b => {
+    if (!b) { beamLengths.push(0); return; }
+    const a = nodeMap.get(b.node_start), e = nodeMap.get(b.node_end);
+    beamLengths.push(Math.sqrt((a.x - e.x) ** 2 + (a.y - e.y) ** 2 + (a.z - e.z) ** 2));
+  });
+
+  // Create beam meshes
+  beams.forEach((b, i) => {
+    if (!b) { beamMeshes.push(null); return; }
+    const ns = nodeMap.get(b.node_start), ne = nodeMap.get(b.node_end);
+    if (!ns || !ne) { beamMeshes.push(null); return; }
+    const p1 = m2t(ns.x, ns.y, ns.z), p2 = m2t(ne.x, ne.y, ne.z);
+    const dir = new THREE.Vector3().subVectors(p2, p1);
+    const len = dir.length();
+    const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
+    const geo = new THREE.CylinderGeometry(0.04, 0.04, len, 4, 1);
+    const mat = baseMat.clone();
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(mid);
+    if (len > 1e-8) mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+    mesh.userData = { type: 'beam', id: b.id, si: b.node_start, ei: b.node_end, length: beamLengths[i] };
+    beamMeshes.push(mesh);
+    beamGroup.add(mesh);
+    // Apply group visibility
+    const grpName = beamGroupMap.get(i) || 'Interior';
+    const grp = memberGroups.get(grpName);
+    if (grp && !grp.visible) mesh.visible = false;
+  });
+
+  // Create node meshes
+  nodes.forEach((n, idx) => {
+    const mat = new THREE.MeshPhongMaterial({ color: defaultNodeColor, shininess: 60, transparent: true, opacity: 0.9 });
+    const mesh = new THREE.Mesh(sphereGeo, mat);
+    mesh.position.copy(m2t(n.x, n.y, n.z));
+    mesh.userData = { type: 'node', id: n.id, x: n.x, y: n.y, z: n.z, degree: degree.get(n.id) };
+    nodeMeshes.push(mesh);
+    nodeIdToMeshIdx.set(n.id, idx);
+    nodeGroup.add(mesh);
+  });
+
+  // Apply group colors
+  applyAllGroupColors();
+
+  // Update camera target
+  orbitControls.target.set(cx, (maxZ + minZ) / 2, -cy);
+  camera.position.set(cx + (maxX - minX), (maxZ + minZ) / 2 + (maxZ - minZ), -cy + (maxY - minY));
+
+  // Update stats
+  updateModelStats();
+}
+
+function updateModelStats() {
+  document.getElementById('s-nodes').textContent = nodes.length;
+  document.getElementById('s-beams').textContent = beams.filter(b => b !== null).length;
+  document.getElementById('s-spanx').textContent = (maxX - minX).toFixed(1);
+  document.getElementById('s-height').textContent = (maxZ - minZ).toFixed(1);
+  document.getElementById('d-xrange').textContent = `[${minX.toFixed(1)}, ${maxX.toFixed(1)}]`;
+  document.getElementById('d-yrange').textContent = `[${minY.toFixed(1)}, ${maxY.toFixed(1)}]`;
+  document.getElementById('d-zrange').textContent = `[${minZ.toFixed(1)}, ${maxZ.toFixed(1)}]`;
+  document.getElementById('d-centroid').textContent = `(${cx.toFixed(1)}, ${cy.toFixed(1)}, ${cz.toFixed(1)})`;
+  const validLens = beamLengths.filter(l => l > 0);
+  if (validLens.length > 0) {
+    const avgLen = validLens.reduce((s, l) => s + l, 0) / validLens.length;
+    document.getElementById('d-avglen').textContent = avgLen.toFixed(3) + ' m';
+    document.getElementById('d-minmaxlen').textContent = `${Math.min(...validLens).toFixed(3)} / ${Math.max(...validLens).toFixed(3)} m`;
+    document.getElementById('d-totlen').textContent = validLens.reduce((s, l) => s + l, 0).toFixed(1) + ' m';
+  }
+  document.getElementById('d-dof').textContent = nodes.length * 6;
+}
+
+// ============================================================
+// LOAD MODEL (unified loader for both formats)
+// ============================================================
+function loadModel(data) {
+  const format = detectJSONFormat(data);
+  if (!format) throw new Error('Unrecognized JSON format');
+
+  clearScene();
+
+  if (format === 'diagrid') {
+    const parsed = parseDiagridJSON(data);
+    nodes.length = 0;
+    parsed.nodes.forEach(n => nodes.push(n));
+    beams.length = 0;
+    parsed.beams.forEach(b => beams.push(b));
+    // Populate row metadata
+    parsed.nodeRowMap.forEach((v, k) => nodeRowMap.set(k, v));
+    rowData = parsed.rowData;
+    connectionData = parsed.connectionData;
+    // Assign beams to groups (populate data only, meshes don't exist yet)
+    function assignGroupData(bi, groupName) {
+      beamGroupMap.set(bi, groupName);
+      const grp = memberGroups.get(groupName);
+      if (grp) grp.beamIndices.add(bi);
+    }
+    parsed.groupAssignments.interior.forEach(bi => assignGroupData(bi, 'Interior'));
+    parsed.groupAssignments.perimeter.forEach(bi => assignGroupData(bi, 'Perimeter'));
+    parsed.groupAssignments.keyChords.forEach(bi => assignGroupData(bi, 'Key Chords'));
+  } else {
+    // Legacy format
+    nodes.length = 0;
+    data.nodes.forEach(n => nodes.push(n));
+    beams.length = 0;
+    data.beams.forEach(b => beams.push(b));
+    // All beams go to Interior by default (data only)
+    const intGrp = memberGroups.get('Interior');
+    beams.forEach((b, bi) => {
+      if (!b) return;
+      beamGroupMap.set(bi, 'Interior');
+      if (intGrp) intGrp.beamIndices.add(bi);
+    });
+  }
+
+  rebuildScene();
+  updateGroupUI();
+}
 
 // ============================================================
 // MODE SWITCHING
@@ -621,8 +924,10 @@ function computeTotalForceVector() {
     if (lc.selfWeight) {
       beams.forEach((b, bi) => {
         if (!b) return;
-        const bsec = beamSections.has(bi) ? beamSections.get(bi) : null;
-        const bA = bsec ? Math.PI / 4 * ((bsec.D / 1000) ** 2 - (bsec.D / 1000 - 2 * bsec.t / 1000) ** 2) : A;
+        const gn = beamGroupMap.get(bi) || 'Interior';
+        const gg = memberGroups.get(gn);
+        if (gg && !gg.includeInFEM) return;
+        const bA = getBeamSectionProps(bi).A;
         const wkNm = rho * bA * g / 1000; // kN/m (weight per unit length)
         addConsistentBeamLoad(F, bi, b, 0, 0, -wkNm);
       });
@@ -630,6 +935,9 @@ function computeTotalForceVector() {
     if (lc.liveLoadIntensity > 0) {
       beams.forEach((b, bi) => {
         if (!b) return;
+        const gn = beamGroupMap.get(bi) || 'Interior';
+        const gg = memberGroups.get(gn);
+        if (gg && !gg.includeInFEM) return;
         addConsistentBeamLoad(F, bi, b, 0, 0, -lc.liveLoadIntensity);
       });
     }
@@ -647,6 +955,9 @@ function computeTotalForceVector() {
       const wz = axis === 'z' ? sign * 1 : 0;
       beams.forEach((b, bi) => {
         if (!b) return;
+        const gn = beamGroupMap.get(bi) || 'Interior';
+        const gg = memberGroups.get(gn);
+        if (gg && !gg.includeInFEM) return;
         const p = lc.windLoad.pressure;
         addConsistentBeamLoad(F, bi, b, wx * p, wy * p, wz * p);
       });
@@ -660,21 +971,25 @@ updateLoadCaseUI();
 
 function computeGlobalForceVector() {
   const F = new Float64Array(nodes.length * 6);
-  const sec = getCHSProps();
-  const A = sec.A;
   const rho = parseFloat(document.getElementById('mat-rho').value) || 7850;
   const g = 9.81;
+  function isBeamInFEM(bi) {
+    const gn = beamGroupMap.get(bi) || 'Interior';
+    const gg = memberGroups.get(gn);
+    return !gg || gg.includeInFEM;
+  }
   if (selfWeightEnabled) {
     beams.forEach((b, bi) => {
-      if(!b)return;
-      const wkN = rho * A * beamLengths[bi] * g / 2 / 1000;
+      if(!b || !isBeamInFEM(bi))return;
+      const bA = getBeamSectionProps(bi).A;
+      const wkN = rho * bA * beamLengths[bi] * g / 2 / 1000;
       const si = nIdx.get(b.node_start), ei = nIdx.get(b.node_end);
       F[si*6+2] -= wkN; F[ei*6+2] -= wkN;
     });
   }
   if (liveLoadIntensity > 0) {
     beams.forEach((b, bi) => {
-      if(!b)return;
+      if(!b || !isBeamInFEM(bi))return;
       const w = liveLoadIntensity * beamLengths[bi] / 2;
       const si = nIdx.get(b.node_start), ei = nIdx.get(b.node_end);
       F[si*6+2] -= w; F[ei*6+2] -= w;
@@ -690,7 +1005,7 @@ function computeGlobalForceVector() {
     const sign = dir.startsWith('-') ? -1 : 1;
     const axis = dir.replace('-', '');
     beams.forEach((b, bi) => {
-      if(!b)return;
+      if(!b || !isBeamInFEM(bi))return;
       const load = windLoad.pressure * beamLengths[bi] / 2;
       const si = nIdx.get(b.node_start), ei = nIdx.get(b.node_end);
       const dofOff = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
@@ -914,8 +1229,8 @@ window.deletePointLoad = function(nid) {
 function updateBeamVisualRadius(bi) {
   const mesh = beamMeshes[bi];
   if (!mesh) return;
-  const sec = beamSections.has(bi) ? beamSections.get(bi) : null;
-  const D = sec ? sec.D / 1000 : getCHSProps().D;
+  const props = getBeamSectionProps(bi);
+  const D = props.D; // already in meters
   const radius = D / 2 * 0.5;
   const oldGeo = mesh.geometry;
   const h = oldGeo.parameters ? oldGeo.parameters.height : beamLengths[bi];
@@ -940,9 +1255,11 @@ window.resetBeamSection = function() {
 };
 
 function updatePerimeterCount() {
+  const perimGrp = memberGroups.get('Perimeter');
+  const perimSize = perimGrp ? perimGrp.beamIndices.size : 0;
   // Check for open ends
   const bAdj = new Map();
-  perimeterSet.forEach(bi => {
+  if (perimGrp) perimGrp.beamIndices.forEach(bi => {
     const b = beams[bi]; if (!b) return;
     if (!bAdj.has(b.node_start)) bAdj.set(b.node_start, new Set());
     if (!bAdj.has(b.node_end)) bAdj.set(b.node_end, new Set());
@@ -951,29 +1268,26 @@ function updatePerimeterCount() {
   });
   let openEnds = 0;
   bAdj.forEach((n) => { if (n.size === 1) openEnds++; });
-  const info = perimeterSet.size > 0 ? perimeterSet.size + ' perimeter beams selected' : '';
+  const info = perimSize > 0 ? perimSize + ' perimeter beams' : '';
   const warn = openEnds > 0 ? ` (${openEnds} open ends)` : ' (closed loop)';
-  document.getElementById('perim-count').textContent = info + (perimeterSet.size > 0 ? warn : '');
-  // Debug: boundary degree distribution
-  const degDist = {};
-  bAdj.forEach(n => { degDist[n.size] = (degDist[n.size] || 0) + 1; });
-  window._perimDebug = { degDist, totalNodes: bAdj.size, totalEdges: perimeterSet.size, openEnds };
+  const el = document.getElementById('perim-count');
+  if (el) el.textContent = info + (perimSize > 0 ? warn : '');
 }
 
 function highlightPerimeterBeam(bi, on) {
   if (!beamMeshes[bi]) return;
-  assignBeamToGroup(bi, on ? 'Perimeter' : 'Default');
+  assignBeamToGroup(bi, on ? 'Perimeter' : 'Interior');
 }
 
 window.togglePerimeterBeam = function(bi) {
-  if (perimeterSet.has(bi)) {
-    perimeterSet.delete(bi);
-    highlightPerimeterBeam(bi, false);
+  const currentGrp = beamGroupMap.get(bi) || 'Interior';
+  if (currentGrp === 'Perimeter') {
+    assignBeamToGroup(bi, 'Interior');
   } else {
-    perimeterSet.add(bi);
-    highlightPerimeterBeam(bi, true);
+    assignBeamToGroup(bi, 'Perimeter');
   }
   updatePerimeterCount();
+  updateGroupUI();
 };
 
 window.autoDetectPerimeter = function() {
@@ -1061,38 +1375,42 @@ window.autoDetectPerimeter = function() {
   boundaryEdges.forEach(key => {
     const bi = beamLookup.get(key);
     if (bi !== undefined) {
-      perimeterSet.add(bi);
       assignBeamToGroup(bi, 'Perimeter');
     }
   });
   updatePerimeterCount();
+  updateGroupUI();
 };
 
 window.clearPerimeterSelection = function() {
-  perimeterSet.forEach(bi => assignBeamToGroup(bi, 'Default'));
-  perimeterSet.clear();
+  const perimGrp = memberGroups.get('Perimeter');
+  if (perimGrp) {
+    [...perimGrp.beamIndices].forEach(bi => assignBeamToGroup(bi, 'Interior'));
+  }
   updatePerimeterCount();
+  updateGroupUI();
 };
 
 window.applyPerimeterSection = function() {
   const D = parseFloat(document.getElementById('perim-D').value);
   const t = parseFloat(document.getElementById('perim-t').value);
-  perimeterSet.forEach(bi => {
-    beamSections.set(bi, { D, t });
-    updateBeamVisualRadius(bi);
-    highlightPerimeterBeam(bi, true);
-  });
+  const perimGrp = memberGroups.get('Perimeter');
+  if (perimGrp) {
+    perimGrp.section = { D, t };
+    perimGrp.beamIndices.forEach(bi => updateBeamVisualRadius(bi));
+  }
   updatePerimeterCount();
+  updateGroupUI();
 };
 
 window.clearPerimeterSection = function() {
-  perimeterSet.forEach(bi => {
-    beamSections.delete(bi);
-    updateBeamVisualRadius(bi);
-    highlightPerimeterBeam(bi, false);
-  });
-  perimeterSet.clear();
+  const perimGrp = memberGroups.get('Perimeter');
+  if (perimGrp) {
+    perimGrp.section = null;
+    perimGrp.beamIndices.forEach(bi => updateBeamVisualRadius(bi));
+  }
   updatePerimeterCount();
+  updateGroupUI();
 };
 
 // ============================================================
@@ -1121,7 +1439,7 @@ function createNewBeam(nid1, nid2) {
   beamGroup.add(mesh);
   // Assign to group based on current mode
   const bi = beamMeshes.length - 1;
-  const group = currentMode === 'ring-connect' ? 'Cross-Section' : 'Default';
+  const group = currentMode === 'ring-connect' ? 'Cross-Section' : 'Interior';
   assignBeamToGroup(bi, group);
   document.getElementById('s-beams').textContent = beams.length;
 }
@@ -1229,6 +1547,20 @@ function computeAndShowSwaps(bi) {
   for (const d of adj.get(nB)) {
     if (d === nA) continue;
     addAlt(nA, d, `Move end → Node ${d}`);
+  }
+
+  // Row-aware alternatives (if row data available)
+  const rowA = nodeRowMap.get(nA);
+  const rowB = nodeRowMap.get(nB);
+  if (rowA !== undefined && rowB !== undefined) {
+    // Find all nodes in same row as nA, offer as start alternatives
+    nodeRowMap.forEach((row, nid) => {
+      if (row === rowA && nid !== nA) addAlt(nid, nB, `Row ${rowA} → Node ${nid}`);
+    });
+    // Find all nodes in same row as nB, offer as end alternatives
+    nodeRowMap.forEach((row, nid) => {
+      if (row === rowB && nid !== nB) addAlt(nA, nid, `Row ${rowB} → Node ${nid}`);
+    });
   }
 
   // Update panel list
@@ -1439,20 +1771,14 @@ window.runFEM = async function() {
   const K=new SparseMatrix(nDof);
   for(let bi=0;bi<beams.length;bi++){
     if(!beams[bi])continue;
+    // Skip beams excluded from FEM by group
+    const grpName = beamGroupMap.get(bi) || 'Interior';
+    const grp = memberGroups.get(grpName);
+    if (grp && !grp.includeInFEM) continue;
     const b=beams[bi],n1=nodeMap.get(b.node_start),n2=nodeMap.get(b.node_end),L=beamLengths[bi];
     if(L<1e-10)continue;
-    // Per-beam section override
-    let bA, bIy, bIz, bJ;
-    if (beamSections.has(bi)) {
-      const bs = beamSections.get(bi);
-      const Do = bs.D / 1000, Di = Do - 2 * bs.t / 1000;
-      bA = Math.PI/4 * (Do*Do - Di*Di);
-      bIy = Math.PI/64 * (Do**4 - Di**4);
-      bIz = bIy;
-      bJ = Math.PI/32 * (Do**4 - Di**4);
-    } else {
-      bA = A; bIy = Iy; bIz = Iz; bJ = J;
-    }
+    // Section resolution: per-beam > group > global
+    const {A:bA, Iy:bIy, Iz:bIz, J:bJ} = getBeamSectionProps(bi);
     const Kl=build3DFrameLocalK(L,E,bA,bIy,bIz,G,bJ);
     const R3=buildRotationMatrix(n1,n2);
     const Kg=transformKtoGlobal(Kl,R3);
@@ -1475,19 +1801,12 @@ window.runFEM = async function() {
 
   const memberForces=beams.map((b,bi)=>{
     if(!b)return null;
+    // Skip beams excluded from FEM
+    const grpNameMF = beamGroupMap.get(bi) || 'Interior';
+    const grpMF = memberGroups.get(grpNameMF);
+    if (grpMF && !grpMF.includeInFEM) return null;
     const n1=nodeMap.get(b.node_start),n2=nodeMap.get(b.node_end),L=beamLengths[bi];
-    // Per-beam section for member force recovery
-    let mA, mIy, mIz, mJ;
-    if (beamSections.has(bi)) {
-      const bs = beamSections.get(bi);
-      const Do = bs.D / 1000, Di = Do - 2 * bs.t / 1000;
-      mA = Math.PI/4 * (Do*Do - Di*Di);
-      mIy = Math.PI/64 * (Do**4 - Di**4);
-      mIz = mIy;
-      mJ = Math.PI/32 * (Do**4 - Di**4);
-    } else {
-      mA = A; mIy = Iy; mIz = Iz; mJ = J;
-    }
+    const {A:mA, Iy:mIy, Iz:mIz, J:mJ} = getBeamSectionProps(bi);
     const Kl=build3DFrameLocalK(L,E,mA,mIy,mIz,G,mJ);
     const R3=buildRotationMatrix(n1,n2);
     const T=Array.from({length:12},()=>new Float64Array(12));
@@ -1745,11 +2064,12 @@ function buildTable(tab) {
     });
   } else {
     if (!femResults) { tableColumns = ['No FEM results']; tableData = []; renderTable(); return; }
-    tableColumns = ['ID','Start','End','Length (m)','Axial (kN)','ShearY (kN)','ShearZ (kN)','MomentY (kNm)','MomentZ (kNm)','Torsion (kNm)','|M| (kNm)'];
+    tableColumns = ['ID','Group','Start','End','Length (m)','Axial (kN)','ShearY (kN)','ShearZ (kN)','MomentY (kNm)','MomentZ (kNm)','Torsion (kNm)','|M| (kNm)'];
     tableData = beams.map((b,i) => {
       if(!b || !femResults.memberForces[i]) return null;
       const mf = femResults.memberForces[i];
-      return [b.id, b.node_start, b.node_end, beamLengths[i], mf.axial, mf.shearY, mf.shearZ, mf.momentY, mf.momentZ, mf.torsion, mf.maxMoment];
+      const grp = beamGroupMap.get(i) || 'Interior';
+      return [b.id, grp, b.node_start, b.node_end, beamLengths[i], mf.axial, mf.shearY, mf.shearZ, mf.momentY, mf.momentZ, mf.torsion, mf.maxMoment];
     }).filter(r => r !== null);
   }
 
@@ -1884,7 +2204,7 @@ renderer.domElement.addEventListener('click', e => {
       const sec = beamSections.get(bi) || { D: parseFloat(document.getElementById('chs-D').value), t: parseFloat(document.getElementById('chs-t').value) };
       document.getElementById('beam-D').value = sec.D;
       document.getElementById('beam-t').value = sec.t;
-      const grpName = beamGroupMap.get(bi) || 'Default';
+      const grpName = beamGroupMap.get(bi) || 'Interior';
       document.getElementById('edit-beam-label').textContent = `Beam #${beams[bi].id} (${beams[bi].node_start}\u2192${beams[bi].node_end}) [${grpName}]`;
       document.getElementById('member-edit-section').style.display = '';
       showBeamGroupAssign(bi);
@@ -3648,131 +3968,35 @@ window.importModel = function() {
   reader.onload = function(e) {
     try {
       const data = JSON.parse(e.target.result);
-      if (!data.nodes || !Array.isArray(data.nodes) || !data.beams || !Array.isArray(data.beams)) {
-        statusEl.innerHTML = '<span class="status-badge warn">JSON must have "nodes" and "beams" arrays</span>';
+      const format = detectJSONFormat(data);
+      if (!format) {
+        statusEl.innerHTML = '<span class="status-badge warn">Unrecognized JSON format. Need {rows,lines} (diagrid) or {nodes,beams} (legacy)</span>';
         return;
       }
-      // Validate nodes
-      for (const n of data.nodes) {
-        if (n.id === undefined || n.x === undefined || n.y === undefined || n.z === undefined) {
-          statusEl.innerHTML = '<span class="status-badge warn">Each node needs id, x, y, z</span>';
-          return;
+      // Validate legacy format
+      if (format === 'legacy') {
+        for (const n of data.nodes) {
+          if (n.id === undefined || n.x === undefined || n.y === undefined || n.z === undefined) {
+            statusEl.innerHTML = '<span class="status-badge warn">Each node needs id, x, y, z</span>';
+            return;
+          }
+        }
+        const nodeIds = new Set(data.nodes.map(n => n.id));
+        for (const b of data.beams) {
+          if (b.id === undefined || b.node_start === undefined || b.node_end === undefined) {
+            statusEl.innerHTML = '<span class="status-badge warn">Each beam needs id, node_start, node_end</span>';
+            return;
+          }
+          if (!nodeIds.has(b.node_start) || !nodeIds.has(b.node_end)) {
+            statusEl.innerHTML = `<span class="status-badge warn">Beam ${b.id}: references unknown node</span>`;
+            return;
+          }
         }
       }
-      // Validate beams
-      const nodeIds = new Set(data.nodes.map(n => n.id));
-      for (const b of data.beams) {
-        if (b.id === undefined || b.node_start === undefined || b.node_end === undefined) {
-          statusEl.innerHTML = '<span class="status-badge warn">Each beam needs id, node_start, node_end</span>';
-          return;
-        }
-        if (!nodeIds.has(b.node_start) || !nodeIds.has(b.node_end)) {
-          statusEl.innerHTML = `<span class="status-badge warn">Beam ${b.id}: references unknown node</span>`;
-          return;
-        }
-      }
 
-      // Clear existing scene
-      while (beamGroup.children.length) { const m = beamGroup.children[0]; beamGroup.remove(m); m.geometry.dispose(); m.material.dispose(); }
-      while (nodeGroup.children.length) { const m = nodeGroup.children[0]; nodeGroup.remove(m); m.geometry.dispose(); m.material.dispose(); }
-      beamMeshes.length = 0;
-      nodeMeshes.length = 0;
-      nodeIdToMeshIdx.clear();
-      nodeMap.clear();
-      nIdx.clear();
-      degree.clear();
-      beamLengths.length = 0;
-      supports.clear();
-      pointLoads.clear();
-      beamSections.clear();
-      perimeterSet.clear();
-      beamGroupMap.clear();
-      memberGroups.forEach(g => g.beamIndices.clear());
-      femResults = null;
-
-      // Replace arrays
-      nodes.length = 0;
-      data.nodes.forEach(n => nodes.push(n));
-      beams.length = 0;
-      data.beams.forEach(b => beams.push(b));
-
-      // Rebuild indices
-      nodes.forEach(n => nodeMap.set(n.id, n));
-      nodes.forEach((n, i) => nIdx.set(n.id, i));
-
-      // Recompute bounds & centroid
-      minX = Infinity; maxX = -Infinity; minY = Infinity; maxY = -Infinity; minZ = Infinity; maxZ = -Infinity;
-      cx = 0; cy = 0; cz = 0;
-      nodes.forEach(n => {
-        minX = Math.min(minX, n.x); maxX = Math.max(maxX, n.x);
-        minY = Math.min(minY, n.y); maxY = Math.max(maxY, n.y);
-        minZ = Math.min(minZ, n.z); maxZ = Math.max(maxZ, n.z);
-        cx += n.x; cy += n.y; cz += n.z;
-      });
-      cx /= nodes.length; cy /= nodes.length; cz /= nodes.length;
-
-      // Recompute degree
-      nodes.forEach(n => degree.set(n.id, 0));
-      beams.forEach(b => {
-        degree.set(b.node_start, (degree.get(b.node_start) || 0) + 1);
-        degree.set(b.node_end, (degree.get(b.node_end) || 0) + 1);
-      });
-
-      // Recompute beam lengths
-      beams.forEach(b => {
-        const a = nodeMap.get(b.node_start), e = nodeMap.get(b.node_end);
-        beamLengths.push(Math.sqrt((a.x - e.x) ** 2 + (a.y - e.y) ** 2 + (a.z - e.z) ** 2));
-      });
-
-      // Rebuild beam meshes
-      beams.forEach((b, i) => {
-        const ns = nodeMap.get(b.node_start), ne = nodeMap.get(b.node_end);
-        if (!ns || !ne) { beamMeshes.push(null); return; }
-        const p1 = m2t(ns.x, ns.y, ns.z), p2 = m2t(ne.x, ne.y, ne.z);
-        const dir = new THREE.Vector3().subVectors(p2, p1);
-        const len = dir.length();
-        const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
-        const geo = new THREE.CylinderGeometry(0.04, 0.04, len, 4, 1);
-        const mat = baseMat.clone();
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.position.copy(mid);
-        if (len > 1e-8) mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
-        mesh.userData = { type: 'beam', id: b.id, si: b.node_start, ei: b.node_end, length: beamLengths[i] };
-        beamMeshes.push(mesh);
-        beamGroup.add(mesh);
-      });
-
-      // Rebuild node meshes
-      nodes.forEach((n, idx) => {
-        const mat = new THREE.MeshPhongMaterial({ color: defaultNodeColor, shininess: 60, transparent: true, opacity: 0.9 });
-        const mesh = new THREE.Mesh(sphereGeo, mat);
-        mesh.position.copy(m2t(n.x, n.y, n.z));
-        mesh.userData = { type: 'node', id: n.id, x: n.x, y: n.y, z: n.z, degree: degree.get(n.id) };
-        nodeMeshes.push(mesh);
-        nodeIdToMeshIdx.set(n.id, idx);
-        nodeGroup.add(mesh);
-      });
-
-      // Update camera target
-      orbitControls.target.set(cx, (maxZ + minZ) / 2, -cy);
-      camera.position.set(cx + (maxX - minX), (maxZ + minZ) / 2 + (maxZ - minZ), -cy + (maxY - minY));
-
-      // Update stats
-      document.getElementById('s-nodes').textContent = nodes.length;
-      document.getElementById('s-beams').textContent = beams.length;
-      document.getElementById('s-spanx').textContent = (maxX - minX).toFixed(1);
-      document.getElementById('s-height').textContent = (maxZ - minZ).toFixed(1);
-      document.getElementById('d-xrange').textContent = `[${minX.toFixed(1)}, ${maxX.toFixed(1)}]`;
-      document.getElementById('d-yrange').textContent = `[${minY.toFixed(1)}, ${maxY.toFixed(1)}]`;
-      document.getElementById('d-zrange').textContent = `[${minZ.toFixed(1)}, ${maxZ.toFixed(1)}]`;
-      document.getElementById('d-centroid').textContent = `(${cx.toFixed(1)}, ${cy.toFixed(1)}, ${cz.toFixed(1)})`;
-      const avgLen = beamLengths.reduce((s, l) => s + l, 0) / beamLengths.length;
-      document.getElementById('d-avglen').textContent = avgLen.toFixed(3) + ' m';
-      document.getElementById('d-minmaxlen').textContent = `${Math.min(...beamLengths).toFixed(3)} / ${Math.max(...beamLengths).toFixed(3)} m`;
-      document.getElementById('d-totlen').textContent = beamLengths.reduce((s, l) => s + l, 0).toFixed(1) + ' m';
-      document.getElementById('d-dof').textContent = nodes.length * 6;
-
-      statusEl.innerHTML = `<span class="status-badge ok">Loaded ${nodes.length} nodes, ${beams.length} beams</span>`;
+      loadModel(data);
+      const formatLabel = format === 'diagrid' ? 'diagrid' : 'legacy';
+      statusEl.innerHTML = `<span class="status-badge ok">Loaded ${nodes.length} nodes, ${beams.length} beams (${formatLabel} format)</span>`;
     } catch (err) {
       statusEl.innerHTML = `<span class="status-badge warn">Parse error: ${err.message}</span>`;
     }
@@ -4127,7 +4351,15 @@ window.exportRobotJSON = function() {
   if (isNaN(G) || G <= 0) G = 0;
 
   const sectionsObj = {};
-  beamSections.forEach((v, k) => { sectionsObj[k] = { D: v.D, t: v.t }; });
+  beams.forEach((b, bi) => {
+    if (!b) return;
+    // Per-beam override
+    if (beamSections.has(bi)) { sectionsObj[bi] = { D: beamSections.get(bi).D, t: beamSections.get(bi).t }; return; }
+    // Group override
+    const gn = beamGroupMap.get(bi) || 'Interior';
+    const gg = memberGroups.get(gn);
+    if (gg && gg.section) { sectionsObj[bi] = { D: gg.section.D, t: gg.section.t }; }
+  });
   const supportsObj = {};
   supports.forEach((v, k) => { supportsObj[k] = { type: v.type, dir: v.dir || null }; });
   const lcData = loadCases.map(lc => {
@@ -4178,7 +4410,15 @@ window.exportToRobot = function() {
   if (isNaN(G) || G <= 0) G = 0;
 
   const sectionsObj = {};
-  beamSections.forEach((v, k) => { sectionsObj[k] = { D: v.D, t: v.t }; });
+  beams.forEach((b, bi) => {
+    if (!b) return;
+    // Per-beam override
+    if (beamSections.has(bi)) { sectionsObj[bi] = { D: beamSections.get(bi).D, t: beamSections.get(bi).t }; return; }
+    // Group override
+    const gn = beamGroupMap.get(bi) || 'Interior';
+    const gg = memberGroups.get(gn);
+    if (gg && gg.section) { sectionsObj[bi] = { D: gg.section.D, t: gg.section.t }; }
+  });
 
   const supportsObj = {};
   supports.forEach((v, k) => { supportsObj[k] = { type: v.type, dir: v.dir }; });
@@ -4723,6 +4963,9 @@ window.importRobotResults = function() {
   };
   reader.readAsText(fileInput.files[0]);
 };
+
+// Load initial model
+loadModel(model);
 
 function animate() {
   requestAnimationFrame(animate);
