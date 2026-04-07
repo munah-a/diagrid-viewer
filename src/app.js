@@ -1826,6 +1826,8 @@ window.runFEM = async function() {
 
   // Compute per-support reactions: R_i = K_row * u - F_applied_i at restrained DOFs
   const Fapplied=computeTotalForceVector();
+  let sumFz=0;
+  for(let i=0;i<nodes.length;i++) sumFz+=Fapplied[i*6+2];
   const reactions = new Map();
   let sumRx=0, sumRy=0, sumRz=0;
   supports.forEach((_sup, nid) => {
@@ -1838,7 +1840,8 @@ window.runFEM = async function() {
       // K[dof][dof] = 1e15, u[dof] ≈ 0, so R ≈ -F[dof] for restrained DOFs
       // More accurately: compute K*u at this row from the original assembly
       let Ku = 0;
-      K.getRow(dof).forEach((val, col) => { Ku += val * result.x[col]; });
+      const kRow = K.rows.get(dof);
+      if (kRow) kRow.forEach((val, col) => { Ku += val * result.x[col]; });
       const reaction = Ku - Fapplied[dof];
       const key = ['fx','fy','fz','mx','my','mz'][d];
       rx[key] = reaction;
@@ -1855,7 +1858,7 @@ window.runFEM = async function() {
     if(Math.abs(uz)>Math.abs(maxUz))maxUz=uz;
   }
   let maxAxial=0,maxMoment=0;
-  memberForces.forEach(mf=>{if(Math.abs(mf.axial)>Math.abs(maxAxial))maxAxial=mf.axial;if(mf.maxMoment>maxMoment)maxMoment=mf.maxMoment;});
+  memberForces.forEach(mf=>{if(!mf)return;if(Math.abs(mf.axial)>Math.abs(maxAxial))maxAxial=mf.axial;if(mf.maxMoment>maxMoment)maxMoment=mf.maxMoment;});
 
   femResults={displacements:result.x,memberForces,reactions,maxU,maxUz,maxAxial,maxMoment,sumRx,sumRy,sumRz,sumFz,iterations:result.iterations,residual:result.residual,solveTime:t1-t0};
 
@@ -2140,7 +2143,7 @@ renderer.domElement.addEventListener('mousemove', e => {
     if(ud.type==='beam'){
       ttTitle.textContent=`Beam #${ud.id}`;
       let h=`<div class="tt-row">Nodes: ${ud.si} \u2192 ${ud.ei}</div><div class="tt-row">L: ${ud.length.toFixed(4)} m</div>`;
-      if(femResults){const mf=femResults.memberForces[ud.id];h+=`<div class="tt-row">Axial: ${mf.axial.toFixed(2)} kN</div><div class="tt-row">|M|: ${mf.maxMoment.toFixed(3)} kNm</div>`;}
+      if(femResults){const mf=femResults.memberForces[ud.id];if(mf)h+=`<div class="tt-row">Axial: ${mf.axial.toFixed(2)} kN</div><div class="tt-row">|M|: ${mf.maxMoment.toFixed(3)} kNm</div>`;else h+=`<div class="tt-row" style="color:#666;">Excluded from FEM</div>`;}
       ttBody.innerHTML=h;
     } else {
       ttTitle.textContent=`Node #${ud.id}`;
