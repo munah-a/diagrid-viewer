@@ -4932,10 +4932,7 @@ window.exportToRobot = function() {
   const includePanels = document.getElementById('robot-include-panels')?.checked !== false;
   if (includePanels && cfdEnvelope && cfdEnvelope.triangles) {
     envelopeData = cfdEnvelope.triangles.map((t, i) => ({
-      id: i,
-      ax: t.a.x, ay: t.a.y, az: t.a.z,
-      bx: t.b.x, by: t.b.y, bz: t.b.z,
-      cx: t.c.x, cy: t.c.y, cz: t.c.z
+      id: i, a: t.a.id, b: t.b.id, c: t.c.id
     }));
   }
 
@@ -5128,23 +5125,25 @@ def main():
     if PANELS:
         print(f"\\nCreating {len(PANELS)} cladding panels...")
         objs = struct.Objects
-        factory = robot.CmpntFactory
+        objs.BeginMultiOperation()
         panel_errors = 0
         panel_ok = 0
         for panel in PANELS:
             pid = panel["id"] + 1 + len(BEAMS)  # Offset IDs past bars
             try:
-                pts = factory.Create(41)  # IRobotPointsArray
-                pts.SetSize(3)
-                pts.Set(1, panel["ax"], panel["ay"], panel["az"])
-                pts.Set(2, panel["bx"], panel["by"], panel["bz"])
-                pts.Set(3, panel["cx"], panel["cy"], panel["cz"])
-                objs.CreateContour(pid, pts)
+                # Use Robot node IDs to create contour linked to structural nodes
+                rn1 = node_id_map[panel["a"]]
+                rn2 = node_id_map[panel["b"]]
+                rn3 = node_id_map[panel["c"]]
+                sel = win32com.client.Dispatch("Robot.Selection")
+                sel.FromText(f"{rn1} {rn2} {rn3}")
+                objs.CreateContour(pid, sel)
                 objs.SetStructuralType(pid, 5)  # 5 = cladding
                 panel_ok += 1
             except Exception as e:
                 panel_errors += 1
                 if panel_errors <= 5: print(f"  Panel {pid} error: {e}")
+        objs.EndMultiOperation()
         print(f"  Created {panel_ok}/{len(PANELS)} panels ({panel_errors} errors)")
 
     # --- Supports ---
