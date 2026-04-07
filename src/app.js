@@ -1,5 +1,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
+import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 // Labels use manual screen-space projection (no CSS2DRenderer)
 
 // ============================================================
@@ -125,6 +128,10 @@ const cfdGroup = new THREE.Group(); scene.add(cfdGroup);
 const supportGroup = new THREE.Group(); scene.add(supportGroup);
 const loadGroup = new THREE.Group(); scene.add(loadGroup);
 const resultGroup = new THREE.Group(); scene.add(resultGroup);
+const geometryGroup = new THREE.Group(); scene.add(geometryGroup);
+let importedGeometries = []; // {name, group, visible}
+let geometryOpacity = 0.7;
+let geometryWireframe = false;
 
 // Load sub-groups for per-type visibility
 const loadSubGroups = { sw: new THREE.Group(), ll: new THREE.Group(), pl: new THREE.Group(), wl: new THREE.Group() };
@@ -4005,6 +4012,210 @@ window.importModel = function() {
     }
   };
   reader.readAsText(fileInput.files[0]);
+};
+
+// ============================================================
+// REFERENCE GEOMETRY IMPORT (Visual Context)
+// ============================================================
+function applyCoordTransform(object3d) {
+  const mode = document.getElementById('geometry-coord-system')?.value || 'zup';
+  if (mode === 'zup') object3d.rotation.x = -Math.PI / 2;
+}
+
+function applyGeometryMaterial(object3d) {
+  object3d.traverse(child => {
+    if (!child.isMesh) return;
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    mats.forEach(m => {
+      m.transparent = true;
+      m.opacity = geometryOpacity;
+      m.wireframe = geometryWireframe;
+      m.side = THREE.DoubleSide;
+      m.depthWrite = false;
+    });
+  });
+}
+
+function addGeometryToScene(filename, object3d) {
+  const wrapper = new THREE.Group();
+  wrapper.name = filename;
+  wrapper.add(object3d);
+  geometryGroup.add(wrapper);
+  importedGeometries.push({ name: filename, group: wrapper, visible: true });
+  updateGeometryUI();
+  // Activate bottom toggle
+  const btn = document.getElementById('btn-toggle-geometry');
+  if (btn && !btn.classList.contains('active')) btn.classList.add('active');
+  geometryGroup.visible = true;
+}
+
+function loadGLTF(filename, arrayBuffer) {
+  const loader = new GLTFLoader();
+  loader.parse(arrayBuffer, '', (gltf) => {
+    const obj = gltf.scene;
+    applyCoordTransform(obj);
+    applyGeometryMaterial(obj);
+    addGeometryToScene(filename, obj);
+    document.getElementById('import-geometry-status').innerHTML =
+      `<span class="status-badge ok">Loaded ${filename}</span>`;
+  }, (err) => {
+    document.getElementById('import-geometry-status').innerHTML =
+      `<span class="status-badge warn">Error loading ${filename}: ${err.message || err}</span>`;
+  });
+}
+
+function loadOBJ(filename, text) {
+  try {
+    const loader = new OBJLoader();
+    const obj = loader.parse(text);
+    applyCoordTransform(obj);
+    // OBJ without MTL: apply default material
+    obj.traverse(child => {
+      if (child.isMesh) {
+        child.material = new THREE.MeshPhongMaterial({
+          color: 0x889aaa, transparent: true, opacity: geometryOpacity,
+          wireframe: geometryWireframe, side: THREE.DoubleSide, depthWrite: false
+        });
+      }
+    });
+    addGeometryToScene(filename, obj);
+    document.getElementById('import-geometry-status').innerHTML =
+      `<span class="status-badge ok">Loaded ${filename}</span>`;
+  } catch (err) {
+    document.getElementById('import-geometry-status').innerHTML =
+      `<span class="status-badge warn">Error loading ${filename}: ${err.message}</span>`;
+  }
+}
+
+function loadSTL(filename, arrayBuffer) {
+  try {
+    const loader = new STLLoader();
+    const geometry = loader.parse(arrayBuffer);
+    const material = new THREE.MeshPhongMaterial({
+      color: 0x889aaa, transparent: true, opacity: geometryOpacity,
+      wireframe: geometryWireframe, side: THREE.DoubleSide, depthWrite: false, shininess: 30
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    const group = new THREE.Group();
+    group.add(mesh);
+    applyCoordTransform(group);
+    addGeometryToScene(filename, group);
+    document.getElementById('import-geometry-status').innerHTML =
+      `<span class="status-badge ok">Loaded ${filename}</span>`;
+  } catch (err) {
+    document.getElementById('import-geometry-status').innerHTML =
+      `<span class="status-badge warn">Error loading ${filename}: ${err.message}</span>`;
+  }
+}
+
+window.importGeometry = function() {
+  const fileInput = document.getElementById('import-geometry-file');
+  const statusEl = document.getElementById('import-geometry-status');
+  if (!fileInput || !fileInput.files.length) {
+    statusEl.innerHTML = '<span class="status-badge warn">No file selected</span>';
+    return;
+  }
+  const files = Array.from(fileInput.files);
+  let loaded = 0;
+  statusEl.innerHTML = `<span class="status-badge info">Loading ${files.length} file(s)...</span>`;
+
+  for (const file of files) {
+    const ext = file.name.split('.').pop().toLowerCase();
+    const reader = new FileReader();
+
+    if (ext === 'obj') {
+      reader.onload = (e) => { loadOBJ(file.name, e.target.result); loaded++; };
+      reader.readAsText(file);
+    } else if (ext === 'gltf' || ext === 'glb') {
+      reader.onload = (e) => { loadGLTF(file.name, e.target.result); loaded++; };
+      reader.readAsArrayBuffer(file);
+    } else if (ext === 'stl') {
+      reader.onload = (e) => { loadSTL(file.name, e.target.result); loaded++; };
+      reader.readAsArrayBuffer(file);
+    } else {
+      statusEl.innerHTML = `<span class="status-badge warn">Unsupported format: .${ext}</span>`;
+    }
+  }
+};
+
+function updateGeometryUI() {
+  const list = document.getElementById('geometry-list');
+  const controls = document.getElementById('geometry-controls');
+  if (!list || !controls) return;
+  if (importedGeometries.length === 0) { controls.style.display = 'none'; list.innerHTML = ''; return; }
+  controls.style.display = '';
+  list.innerHTML = '';
+  importedGeometries.forEach((item, idx) => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:5px;padding:4px 6px;border-radius:5px;background:rgba(30,35,55,0.5);margin-bottom:3px;';
+    const visColor = item.visible ? '#adf' : '#644';
+    const visIcon = item.visible ? '\u{1F441}' : '\u{1F441}\u{200D}\u{1F5E8}';
+    row.innerHTML = `
+      <button onclick="toggleSingleGeometry(${idx})" style="background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px;color:${visColor};">${visIcon}</button>
+      <span style="flex:1;font-size:10px;color:#cce;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${item.name}">${item.name}</span>
+      <button onclick="removeGeometry(${idx})" style="background:none;border:none;color:#866;cursor:pointer;font-size:11px;padding:0 2px;">\u2715</button>`;
+    list.appendChild(row);
+  });
+}
+
+window.toggleGeometryVisibility = function(btn) {
+  btn.classList.toggle('active');
+  geometryGroup.visible = btn.classList.contains('active');
+};
+
+window.toggleSingleGeometry = function(idx) {
+  if (idx < 0 || idx >= importedGeometries.length) return;
+  const item = importedGeometries[idx];
+  item.visible = !item.visible;
+  item.group.visible = item.visible;
+  updateGeometryUI();
+};
+
+window.setGeometryOpacity = function(val) {
+  geometryOpacity = parseInt(val) / 100;
+  const label = document.getElementById('geometry-opacity-val');
+  if (label) label.textContent = val + '%';
+  geometryGroup.traverse(child => {
+    if (child.isMesh) {
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      mats.forEach(m => { m.opacity = geometryOpacity; });
+    }
+  });
+};
+
+window.toggleGeometryWireframe = function(btn) {
+  btn.classList.toggle('active');
+  geometryWireframe = btn.classList.contains('active');
+  geometryGroup.traverse(child => {
+    if (child.isMesh) {
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      mats.forEach(m => { m.wireframe = geometryWireframe; });
+    }
+  });
+};
+
+window.removeGeometry = function(idx) {
+  if (idx < 0 || idx >= importedGeometries.length) return;
+  const item = importedGeometries[idx];
+  item.group.traverse(child => {
+    if (child.isMesh) {
+      child.geometry.dispose();
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      mats.forEach(m => m.dispose());
+    }
+  });
+  geometryGroup.remove(item.group);
+  importedGeometries.splice(idx, 1);
+  updateGeometryUI();
+  if (importedGeometries.length === 0) {
+    const btn = document.getElementById('btn-toggle-geometry');
+    if (btn) btn.classList.remove('active');
+    document.getElementById('import-geometry-status').innerHTML = '';
+  }
+};
+
+window.clearAllGeometry = function() {
+  while (importedGeometries.length > 0) window.removeGeometry(0);
 };
 
 // ============================================================

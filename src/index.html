@@ -155,6 +155,33 @@ else:
     result = "Set export=True, connect lines &amp; path"</pre>
     <button class="ctrl-btn" onclick="copyGHScript()" style="position:absolute;top:4px;right:4px;font-size:9px;padding:3px 6px;">Copy</button>
   </div>
+
+  <div class="section-title">Import Reference Geometry</div>
+  <p style="font-size:10px;color:#666;margin-bottom:6px;">Load 3D geometry for visual context (not analyzed). Supports glTF/GLB, OBJ, STL.</p>
+  <input type="file" id="import-geometry-file" accept=".gltf,.glb,.obj,.stl" multiple
+    style="font-size:10px;margin-bottom:6px;width:100%;background:rgba(20,25,45,0.6);border:1px solid rgba(100,120,200,0.15);border-radius:5px;padding:6px;color:#aac;">
+  <div class="input-group" style="margin-bottom:6px;">
+    <label>Coordinate System</label>
+    <select id="geometry-coord-system" style="font-size:11px;">
+      <option value="zup">Z-Up (Rhino, Revit, Civil 3D)</option>
+      <option value="yup">Y-Up (glTF native, SketchUp)</option>
+    </select>
+  </div>
+  <button class="action-btn success" onclick="importGeometry()">Import Geometry</button>
+  <div id="import-geometry-status" style="margin-top:4px;"></div>
+
+  <div id="geometry-controls" style="display:none;margin-top:8px;">
+    <div id="geometry-list" style="margin-bottom:6px;"></div>
+    <div class="input-group" style="margin-bottom:4px;">
+      <label>Opacity: <span id="geometry-opacity-val">70%</span></label>
+      <input type="range" id="geometry-opacity" min="5" max="100" value="70" step="5"
+        oninput="setGeometryOpacity(this.value)" style="width:100%;">
+    </div>
+    <div style="display:flex;gap:4px;">
+      <button class="ctrl-btn" id="btn-geo-wireframe" onclick="toggleGeometryWireframe(this)" style="flex:1;text-align:center;">Wireframe</button>
+      <button class="action-btn danger" onclick="clearAllGeometry()" style="flex:1;text-align:center;font-size:10px;">Clear All</button>
+    </div>
+  </div>
 </div>
 
 <!-- Right Panel: Cross-Section Connect -->
@@ -596,6 +623,7 @@ else:
     <button class="ctrl-btn" onclick="toggleAutoRotate(this)">Auto-Rotate</button>
     <button class="ctrl-btn" onclick="resetView()">Reset View</button>
     <button class="ctrl-btn" onclick="toggleBackground(this)">Light BG</button>
+    <button class="ctrl-btn active" onclick="toggleGeometryVisibility(this)" id="btn-toggle-geometry">Geometry</button>
   </div>
 </div>
 
