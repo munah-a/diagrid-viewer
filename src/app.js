@@ -5125,26 +5125,45 @@ def main():
     if PANELS:
         print(f"\\nCreating {len(PANELS)} cladding panels...")
         objs = struct.Objects
+        factory = robot.CmpntFactory
+
+        # Build node coordinate lookup from NODES data
+        node_coords = {}
+        for n in NODES:
+            node_coords[n["id"]] = (n["x"], n["y"], n["z"])
+
+        # Phase 1: Create all contours from coordinates
         objs.BeginMultiOperation()
+        panel_ids = []
         panel_errors = 0
-        panel_ok = 0
         for panel in PANELS:
-            pid = panel["id"] + 1 + len(BEAMS)  # Offset IDs past bars
+            pid = panel["id"] + 1 + len(BEAMS)
             try:
-                # Use Robot node IDs to create contour linked to structural nodes
-                rn1 = node_id_map[panel["a"]]
-                rn2 = node_id_map[panel["b"]]
-                rn3 = node_id_map[panel["c"]]
-                sel = win32com.client.Dispatch("Robot.Selection")
-                sel.FromText(f"{rn1} {rn2} {rn3}")
-                objs.CreateContour(pid, sel)
-                objs.SetStructuralType(pid, 5)  # 5 = cladding
-                panel_ok += 1
+                ca = node_coords[panel["a"]]
+                cb = node_coords[panel["b"]]
+                cc = node_coords[panel["c"]]
+                pts = factory.Create(41)
+                pts.SetSize(3)
+                pts.Set(1, ca[0], ca[1], ca[2])
+                pts.Set(2, cb[0], cb[1], cb[2])
+                pts.Set(3, cc[0], cc[1], cc[2])
+                objs.CreateContour(pid, pts)
+                panel_ids.append(pid)
             except Exception as e:
                 panel_errors += 1
-                if panel_errors <= 5: print(f"  Panel {pid} error: {e}")
+                if panel_errors <= 3: print(f"  Panel {pid} create error: {e}")
         objs.EndMultiOperation()
-        print(f"  Created {panel_ok}/{len(PANELS)} panels ({panel_errors} errors)")
+        print(f"  Created {len(panel_ids)}/{len(PANELS)} contours")
+
+        # Phase 2: Convert all to cladding type
+        cladding_ok = 0
+        for pid in panel_ids:
+            try:
+                objs.SetStructuralType(pid, 5)  # 5 = cladding
+                cladding_ok += 1
+            except:
+                pass
+        print(f"  Converted {cladding_ok}/{len(panel_ids)} to cladding")
 
     # --- Supports ---
     print(f"Applying {len(SUPPORTS)} supports...")
