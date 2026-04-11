@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Diagrid Beam Model - FEM Structural Analysis</title>
+  <script type="module" crossorigin src="/assets/index-D8LHfEMV.js"></script>
+  <link rel="modulepreload" crossorigin href="/assets/three-CnFVv8bJ.js">
+  <link rel="stylesheet" crossorigin href="/assets/index-CZV9W0cz.css">
+</head>
+<body>
+<div id="canvas-container">
+  <canvas id="cfd-legend-canvas" width="60" height="240"></canvas>
+</div>
+
+<!-- Mode Toolbar - Grouped -->
+<div id="mode-toolbar">
+  <button class="mode-btn active" onclick="setMode('view')" style="display:inline-block;width:auto;">View</button>
+  <div class="tb-sep"></div>
+
+  <div class="tb-group" data-group="model">
+    <button class="tb-group-btn">Model</button>
+    <div class="tb-dropdown"><div class="tb-dropdown-inner">
+      <button class="mode-btn" onclick="setMode('import-model')">Import Model</button>
+      <button class="mode-btn" onclick="setMode('section')">Section &amp; Material</button>
+      <button class="mode-btn" onclick="setMode('add-member')">Add Member</button>
+      <button class="mode-btn" onclick="setMode('add-column')">Add Column</button>
+      <button class="mode-btn" onclick="setMode('edit-beam')">Edit Beam</button>
+      <button class="mode-btn" onclick="setMode('ring-connect')">Cross-Section Connect</button>
+    </div></div>
+  </div>
+
+  <div class="tb-group" data-group="boundary">
+    <button class="tb-group-btn">Boundary</button>
+    <div class="tb-dropdown"><div class="tb-dropdown-inner">
+      <button class="mode-btn" onclick="setMode('supports')">Supports</button>
+      <button class="mode-btn" onclick="setMode('loads')">Load Cases &amp; Loads</button>
+      <button class="mode-btn" onclick="setMode('cables')">Tension Cables</button>
+    </div></div>
+  </div>
+
+  <div class="tb-group" data-group="analysis">
+    <button class="tb-group-btn">Analysis</button>
+    <div class="tb-dropdown"><div class="tb-dropdown-inner">
+      <button class="mode-btn" onclick="setMode('analysis')">FEM Solver</button>
+      <button class="mode-btn" onclick="setMode('cfd')">CFD Wind</button>
+      <button class="mode-btn" onclick="setMode('robot')">Robot Export</button>
+    </div></div>
+  </div>
+</div>
+
+<!-- Left Info Panel -->
+<div id="info-panel" class="panel">
+  <h1>DIAGRID BEAM MODEL</h1>
+  <div class="subtitle">FEM Structural Analysis</div>
+  <div class="stat-grid">
+    <div class="stat-card"><div class="label">Nodes</div><div class="value" id="s-nodes">--</div></div>
+    <div class="stat-card"><div class="label">Beams</div><div class="value" id="s-beams">--</div></div>
+    <div class="stat-card"><div class="label">Span X</div><div class="value" id="s-spanx">--</div><div class="unit">m</div></div>
+    <div class="stat-card"><div class="label">Height Z</div><div class="value" id="s-height">--</div><div class="unit">m</div></div>
+  </div>
+  <div class="section-title">Geometry</div>
+  <div class="detail-row"><span class="key">X range</span><span class="val" id="d-xrange">--</span></div>
+  <div class="detail-row"><span class="key">Y range</span><span class="val" id="d-yrange">--</span></div>
+  <div class="detail-row"><span class="key">Z range</span><span class="val" id="d-zrange">--</span></div>
+  <div class="detail-row"><span class="key">Centroid</span><span class="val" id="d-centroid">--</span></div>
+  <div class="section-title">Beam Statistics</div>
+  <div class="detail-row"><span class="key">Avg length</span><span class="val" id="d-avglen">--</span></div>
+  <div class="detail-row"><span class="key">Min / Max</span><span class="val" id="d-minmaxlen">--</span></div>
+  <div class="detail-row"><span class="key">Total length</span><span class="val" id="d-totlen">--</span></div>
+  <div class="section-title">Model Status</div>
+  <div class="detail-row"><span class="key">Section</span><span class="val" id="d-section">--</span></div>
+  <div class="detail-row"><span class="key">Supports</span><span class="val" id="d-supports">0</span></div>
+  <div class="detail-row"><span class="key">Loaded nodes</span><span class="val" id="d-loaded">0</span></div>
+  <div class="detail-row"><span class="key">DOF (total)</span><span class="val" id="d-dof">--</span></div>
+  <div class="detail-row"><span class="key">DOF (free)</span><span class="val" id="d-freedof">--</span></div>
+</div>
+
+<!-- Right Panel: Import Model -->
+<div id="panel-import-model" class="panel hidden" style="top:60px;right:16px;padding:16px;min-width:290px;max-width:340px;max-height:calc(100vh - 90px);overflow-y:auto;">
+  <div class="rp-title">Import Model</div>
+  <p style="font-size:10px;color:#778;margin-bottom:10px;">Load a diagrid model from a JSON file. Replaces the current model.</p>
+
+  <div class="section-title" style="margin-top:0;border:none;padding-top:0;">Select JSON File</div>
+  <input type="file" id="import-model-file" accept=".json" style="font-size:10px;color:#888;margin-bottom:8px;width:100%;">
+  <button class="action-btn success" onclick="importModel()">Import Model</button>
+  <div id="import-model-status" style="margin-top:6px;"></div>
+
+  <div class="section-title">Save Project</div>
+  <p style="font-size:10px;color:#778;margin-bottom:8px;">Save all model state (supports, loads, sections, groups) to a project file. Load it back via Import Model above.</p>
+  <button class="action-btn" onclick="saveProject()" style="width:100%;">Save Project</button>
+
+  <div class="section-title">JSON Format</div>
+  <p style="font-size:10px;color:#778;margin-bottom:6px;">The file must have <code style="color:#adf">nodes</code> and <code style="color:#adf">beams</code> arrays:</p>
+  <pre style="background:rgba(20,25,40,0.7);border-radius:6px;padding:8px 10px;font-size:9px;color:#8ab;overflow-x:auto;margin-bottom:6px;line-height:1.5;border:1px solid rgba(100,140,255,0.1);">{
+  "nodes": [
+    { "id": 0, "x": 0.0, "y": 0.0, "z": 0.0 },
+    { "id": 1, "x": 5.0, "y": 0.0, "z": 3.0 }
+  ],
+  "beams": [
+    { "id": 0, "node_start": 0, "node_end": 1 }
+  ]
+}</pre>
+  <div style="font-size:9px;color:#667;line-height:1.5;">
+    <strong style="color:#8ab;">Rules:</strong><br>
+    &bull; Node <code>id</code> must be unique integers (0-based preferred)<br>
+    &bull; Coordinates <code>x, y, z</code> in <strong>metres</strong><br>
+    &bull; Beam <code>node_start</code> / <code>node_end</code> must reference valid node ids<br>
+    &bull; Beam <code>id</code> must be unique integers<br>
+    &bull; No duplicate beams (same start&ndash;end pair)
+  </div>
+
+  <div class="section-title">Grasshopper Export Script</div>
+  <p style="font-size:10px;color:#778;margin-bottom:6px;">Use this GhPython component to export lines as a JSON model:</p>
+  <div style="position:relative;">
+    <pre id="gh-script-block" style="background:rgba(20,25,40,0.7);border-radius:6px;padding:8px 10px;font-size:9px;color:#8ab;overflow-x:auto;max-height:200px;overflow-y:auto;line-height:1.4;border:1px solid rgba(100,140,255,0.1);">"""Grasshopper Python – export lines to diagrid JSON
+Inputs:
+  lines   - list of Line/Curve geometry
+  path    - file path string (e.g. "C:\\model.json")
+  export  - boolean toggle to trigger export
+"""
+import json
+import Rhino.Geometry as rg
+
+if export and lines and path:
+    pts = {}
+    nid = 0
+    beams_out = []
+    bid = 0
+
+    def pt_key(p):
+        return (round(p.X,6), round(p.Y,6), round(p.Z,6))
+
+    def get_or_add(p):
+        nonlocal nid
+        k = pt_key(p)
+        if k not in pts:
+            pts[k] = {"id": nid, "x": p.X, "y": p.Y, "z": p.Z}
+            nid += 1
+        return pts[k]["id"]
+
+    for ln in lines:
+        if hasattr(ln, "PointAtStart"):
+            p1, p2 = ln.PointAtStart, ln.PointAtEnd
+        else:
+            p1, p2 = rg.Point3d(ln.From), rg.Point3d(ln.To)
+        n1 = get_or_add(p1)
+        n2 = get_or_add(p2)
+        if n1 != n2:
+            beams_out.append({"id": bid, "node_start": n1,
+                              "node_end": n2})
+            bid += 1
+
+    model = {
+        "nodes": sorted(pts.values(), key=lambda n: n["id"]),
+        "beams": beams_out
+    }
+    with open(path, "w") as f:
+        json.dump(model, f, indent=2)
+    result = "Exported %d nodes, %d beams" % (len(pts), len(beams_out))
+else:
+    result = "Set export=True, connect lines &amp; path"</pre>
+    <button class="ctrl-btn" onclick="copyGHScript()" style="position:absolute;top:4px;right:4px;font-size:9px;padding:3px 6px;">Copy</button>
+  </div>
+
+  <div class="section-title">Import Reference Geometry</div>
+  <p style="font-size:10px;color:#666;margin-bottom:6px;">Load 3D geometry for visual context (not analyzed). Supports glTF/GLB, OBJ, STL.</p>
+  <input type="file" id="import-geometry-file" accept=".gltf,.glb,.obj,.stl" multiple
+    style="font-size:10px;margin-bottom:6px;width:100%;background:rgba(20,25,45,0.6);border:1px solid rgba(100,120,200,0.15);border-radius:5px;padding:6px;color:#aac;">
+  <div class="input-group" style="margin-bottom:6px;">
+    <label>Coordinate System</label>
+    <select id="geometry-coord-system" style="font-size:11px;">
+      <option value="zup">Z-Up (Rhino, Revit, Civil 3D)</option>
+      <option value="yup">Y-Up (glTF native, SketchUp)</option>
+    </select>
+  </div>
+  <button class="action-btn success" onclick="importGeometry()">Import Geometry</button>
+  <div id="import-geometry-status" style="margin-top:4px;"></div>
+
+  <div id="geometry-controls" style="display:none;margin-top:8px;">
+    <div id="geometry-list" style="margin-bottom:6px;"></div>
+    <div class="input-group" style="margin-bottom:4px;">
+      <label>Opacity: <span id="geometry-opacity-val">70%</span></label>
+      <input type="range" id="geometry-opacity" min="5" max="100" value="70" step="5"
+        oninput="setGeometryOpacity(this.value)" style="width:100%;">
+    </div>
+    <div style="display:flex;gap:4px;">
+      <button class="ctrl-btn" id="btn-geo-wireframe" onclick="toggleGeometryWireframe(this)" style="flex:1;text-align:center;">Wireframe</button>
+      <button class="action-btn danger" onclick="clearAllGeometry()" style="flex:1;text-align:center;font-size:10px;">Clear All</button>
+    </div>
+  </div>
+</div>
+
+<!-- Right Panel: Cross-Section Connect -->
+<div id="panel-ring-connect" class="panel hidden" style="top:60px;right:16px;padding:16px;min-width:280px;max-width:310px;max-height:calc(100vh - 90px);overflow-y:auto;">
+  <div class="rp-title">Cross-Section Connect</div>
+  <p style="font-size:10px;color:#778;margin-bottom:8px;">Click a node to find all nodes in the same cross-section (perpendicular to the structure's long axis), then connect them as a ring.</p>
+
+  <div class="section-title" style="margin-top:0;border:none;padding-top:0;">Settings</div>
+  <div class="input-group">
+    <label>Slice axis (auto-detected)</label>
+    <select id="ring-axis">
+      <option value="auto">Auto (longest span)</option>
+      <option value="x">Perpendicular to X</option>
+      <option value="y">Perpendicular to Y</option>
+      <option value="z">Perpendicular to Z</option>
+    </select>
+  </div>
+  <div class="input-group">
+    <label>Tolerance (m)</label>
+    <input type="number" id="ring-z-tol" value="0.5" step="0.1" min="0.01">
+  </div>
+
+  <div class="section-title">Mode</div>
+  <div class="btn-row" style="margin-bottom:8px;">
+    <button class="ctrl-btn active" id="btn-cs-single" onclick="setCSMode('single')" style="flex:1;text-align:center;">Single</button>
+    <button class="ctrl-btn" id="btn-cs-range" onclick="setCSMode('range')" style="flex:1;text-align:center;">Range</button>
+    <button class="ctrl-btn" id="btn-cs-line" onclick="setCSMode('line')" style="flex:1;text-align:center;">Line</button>
+  </div>
+
+  <div class="section-title">Selection</div>
+  <div id="ring-axis-info" style="font-size:10px;color:#667;margin-bottom:4px;"></div>
+  <div id="ring-connect-info" style="font-size:11px;color:#aaa;margin-bottom:8px;">Click a node to start...</div>
+  <div id="ring-preview-count" style="font-size:10px;color:#778;"></div>
+  <button class="action-btn success" id="btn-ring-connect" onclick="executeRingConnect()" disabled>Connect Cross-Section</button>
+  <button class="action-btn" onclick="clearRingPreview()">Clear Preview</button>
+</div>
+
+<!-- Right Panel: Section & Material -->
+<div id="panel-section" class="panel hidden" style="top:60px;right:16px;padding:16px;min-width:280px;max-width:310px;max-height:calc(100vh - 90px);overflow-y:auto;">
+  <div class="rp-title">Section & Material</div>
+  <div class="section-title" style="margin-top:0;border:none;padding-top:0;">CHS Cross Section</div>
+  <div class="input-row">
+    <div class="input-group"><label>Outer Diameter D (mm)</label><input type="number" id="chs-D" value="219.1" step="0.1" min="10" oninput="updateCHSProps()"></div>
+    <div class="input-group"><label>Wall Thickness t (mm)</label><input type="number" id="chs-t" value="8" step="0.1" min="1" oninput="updateCHSProps()"></div>
+  </div>
+  <div style="margin:8px 0 4px;font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.5px;">Computed Properties</div>
+  <div class="computed-row"><span>Area A</span><span class="cv" id="chs-A">--</span></div>
+  <div class="computed-row"><span>Iy = Iz</span><span class="cv" id="chs-I">--</span></div>
+  <div class="computed-row"><span>Torsion J</span><span class="cv" id="chs-J">--</span></div>
+  <div class="section-title">Material</div>
+  <div class="input-group"><label>Young's Modulus E (GPa)</label><input type="number" id="mat-E" value="200" step="1"></div>
+  <div class="input-group"><label>Density (kg/m3)</label><input type="number" id="mat-rho" value="7850" step="10"></div>
+  <div class="input-group"><label>Shear Modulus G (GPa) [auto = E/2.6]</label><input type="number" id="mat-G" value="" placeholder="auto"></div>
+  <div class="section-title">Presets</div>
+  <div class="btn-row">
+    <button class="ctrl-btn" onclick="setSectionPreset('chs219')">CHS 219x8</button>
+    <button class="ctrl-btn" onclick="setSectionPreset('chs168')">CHS 168x6</button>
+    <button class="ctrl-btn" onclick="setSectionPreset('chs324')">CHS 324x10</button>
+  </div>
+  <div class="btn-row" style="margin-top:4px;">
+    <button class="ctrl-btn" onclick="setMatPreset('steel')">Steel S355</button>
+    <button class="ctrl-btn" onclick="setMatPreset('aluminum')">Aluminum 6061</button>
+  </div>
+  <div class="section-title">Member Groups</div>
+  <p style="font-size:9px;color:#666;margin-bottom:4px;">Groups control section, FEM inclusion, and visibility. Click icons to toggle.</p>
+  <div id="group-list" style="margin-bottom:6px;"></div>
+  <div id="group-section-edit" style="display:none;background:rgba(20,25,45,0.7);border-radius:5px;padding:8px;margin-bottom:6px;">
+    <div style="font-size:10px;color:#adf;margin-bottom:4px;">Section for: <span id="group-section-name">--</span></div>
+    <div class="input-row">
+      <div class="input-group"><label>D (mm)</label><input type="number" id="group-section-D" step="0.1" min="10" placeholder="global"></div>
+      <div class="input-group"><label>t (mm)</label><input type="number" id="group-section-t" step="0.1" min="1" placeholder="global"></div>
+    </div>
+    <div style="display:flex;gap:4px;">
+      <button class="action-btn" onclick="applyGroupSection()" style="flex:1;">Apply</button>
+      <button class="action-btn danger" onclick="resetGroupSection()" style="flex:1;">Use Global</button>
+    </div>
+  </div>
+  <div style="display:flex;gap:4px;align-items:end;">
+    <div class="input-group" style="flex:1;margin:0;"><label>New Group</label><input type="text" id="new-group-name" placeholder="Group name" style="font-size:10px;"></div>
+    <div class="input-group" style="width:40px;margin:0;"><label>Color</label><input type="color" id="new-group-color" value="#44ddff" style="padding:1px 2px;height:26px;"></div>
+    <button class="ctrl-btn" onclick="createMemberGroup(document.getElementById('new-group-name').value, document.getElementById('new-group-color').value);document.getElementById('new-group-name').value='';" style="padding:5px 8px;margin-bottom:0;">+</button>
+  </div>
+
+  <div class="section-title">Per-Beam Override</div>
+  <div id="member-edit-section" style="display:none;">
+    <div style="font-size:11px;color:#adf;margin-bottom:6px;" id="edit-beam-label">Beam #--</div>
+    <div class="input-row">
+      <div class="input-group"><label>D (mm)</label><input type="number" id="beam-D" step="0.1" min="10"></div>
+      <div class="input-group"><label>t (mm)</label><input type="number" id="beam-t" step="0.1" min="1"></div>
+    </div>
+    <button class="action-btn" onclick="applyBeamSection()">Apply to Beam</button>
+    <button class="action-btn" onclick="resetBeamSection()">Reset to Global</button>
+  </div>
+  <p style="font-size:10px;color:#666;">Click a beam to edit its section or Shift+click to toggle perimeter.</p>
+  <div id="beam-group-assign" style="display:none;margin-top:8px;">
+    <div class="input-group"><label>Assign selected beam to group</label>
+      <select id="beam-group-select" onchange="assignSelectedBeamGroup(this.value)" style="font-size:11px;"></select>
+    </div>
+  </div>
+
+  <div class="section-title">Perimeter (Legacy)</div>
+  <div id="perim-legacy-section">
+    <p style="font-size:9px;color:#666;margin-bottom:4px;">For legacy models without pre-classified perimeter.</p>
+    <div style="display:flex;gap:4px;margin-bottom:6px;">
+      <button class="ctrl-btn" onclick="autoDetectPerimeter()" style="flex:1;text-align:center;">Auto-Detect</button>
+      <button class="ctrl-btn" onclick="clearPerimeterSelection()" style="flex:1;text-align:center;">Clear</button>
+    </div>
+    <div class="input-row">
+      <div class="input-group"><label>D (mm)</label><input type="number" id="perim-D" value="323.9" step="0.1" min="10"></div>
+      <div class="input-group"><label>t (mm)</label><input type="number" id="perim-t" value="10" step="0.1" min="1"></div>
+    </div>
+    <button class="action-btn" onclick="applyPerimeterSection()">Apply to Perimeter</button>
+    <button class="action-btn danger" onclick="clearPerimeterSection()">Reset Perimeter</button>
+    <div id="perim-count" style="font-size:10px;color:#778;margin-top:4px;"></div>
+  </div>
+</div>
+
+<!-- Right Panel: Supports -->
+<div id="panel-supports" class="panel hidden" style="top:60px;right:16px;padding:16px;min-width:280px;max-width:300px;max-height:calc(100vh - 90px);overflow-y:auto;">
+  <div class="rp-title">Define Supports</div>
+  <p style="font-size:11px;color:#888;margin-bottom:10px;">Click nodes to assign support type. Click again to remove.</p>
+  <div class="input-group">
+    <label>Support type to assign</label>
+    <select id="support-type-select">
+      <option value="fixed">Fixed (all DOF restrained)</option>
+      <option value="pinned">Pinned (translations restrained)</option>
+      <option value="roller">Roller (single direction)</option>
+    </select>
+  </div>
+  <div class="input-group" id="roller-dir-group" style="display:none;">
+    <label>Roller restrained direction</label>
+    <select id="roller-dir-select">
+      <option value="z">Z (vertical)</option>
+      <option value="x">X</option>
+      <option value="y">Y</option>
+    </select>
+  </div>
+  <div style="margin:10px 0;"><span class="status-badge info" id="support-count">0 supports defined</span></div>
+  <div style="font-size:10px;color:#777;margin-bottom:8px;">
+    <div style="display:flex;align-items:center;gap:6px;padding:2px 0;"><span style="display:inline-block;width:10px;height:10px;background:#e04040;border-radius:2px;"></span> Fixed</div>
+    <div style="display:flex;align-items:center;gap:6px;padding:2px 0;"><span style="display:inline-block;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:10px solid #40c040;"></span> Pinned</div>
+    <div style="display:flex;align-items:center;gap:6px;padding:2px 0;"><span style="display:inline-block;width:10px;height:10px;background:#e0c040;border-radius:50%;"></span> Roller</div>
+  </div>
+  <button class="action-btn" onclick="autoAssignSupports()">Auto-assign bottom nodes</button>
+  <button class="action-btn danger" onclick="clearSupports()">Clear all supports</button>
+  <div class="section-title">Current Supports</div>
+  <div id="support-list" style="max-height:200px;overflow-y:auto;font-size:10px;"></div>
+</div>
+
+<!-- Right Panel: Loads -->
+<div id="panel-loads" class="panel hidden" style="top:60px;right:16px;padding:16px;min-width:280px;max-width:300px;max-height:calc(100vh - 90px);overflow-y:auto;">
+  <div class="rp-title">Apply Loads</div>
+  <div class="section-title" style="margin-top:0;border:none;padding-top:0;">Load Case</div>
+  <div class="lc-bar">
+    <select id="lc-select" onchange="switchLoadCase()"></select>
+    <button class="ctrl-btn" onclick="addLoadCase()" title="New load case">+</button>
+    <button class="ctrl-btn" onclick="deleteLoadCase()" title="Delete load case">&times;</button>
+  </div>
+  <div class="input-row" style="margin-bottom:8px;">
+    <div class="input-group"><label>Name</label><input type="text" id="lc-name" onchange="renameLoadCase(this.value)" style="font-size:11px;"></div>
+    <div class="input-group"><label>Nature</label><select id="lc-nature" onchange="updateLoadCaseNature(this.value)" style="font-size:11px;">
+      <option value="dead">Dead</option><option value="live">Live</option><option value="wind">Wind</option><option value="custom">Custom</option>
+    </select></div>
+  </div>
+  <div class="section-title">Quick Templates</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:4px;">
+    <button class="ctrl-btn" onclick="applyLoadTemplate(0)" style="text-align:center;font-size:10px;">Dead Load</button>
+    <button class="ctrl-btn" onclick="applyLoadTemplate(1)" style="text-align:center;font-size:10px;">Office Live</button>
+    <button class="ctrl-btn" onclick="applyLoadTemplate(2)" style="text-align:center;font-size:10px;">Residential</button>
+    <button class="ctrl-btn" onclick="applyLoadTemplate(3)" style="text-align:center;font-size:10px;">Wind +X</button>
+    <button class="ctrl-btn" onclick="applyLoadTemplate(4)" style="text-align:center;font-size:10px;">Wind +Y</button>
+    <button class="ctrl-btn" onclick="applyLoadTemplate(5)" style="text-align:center;font-size:10px;">Snow Load</button>
+  </div>
+  <div class="section-title">Self-Weight</div>
+  <p style="font-size:10px;color:#777;margin-bottom:6px;">Uses section area & material density from Section panel.</p>
+  <button class="action-btn" id="btn-selfweight" onclick="toggleSelfWeight()" style="margin:0;">Enable Self-Weight</button>
+  <div class="section-title">Uniform Live Load</div>
+  <div class="input-group"><label>Live load (kN/m along beams)</label><input type="number" id="live-load-val" value="0" step="0.1" min="0"></div>
+  <button class="action-btn" onclick="applyLiveLoad()">Apply Live Load</button>
+  <div class="section-title">Point Loads</div>
+  <p style="font-size:10px;color:#888;margin-bottom:6px;">Click a node, then enter forces.</p>
+  <div id="point-load-node" style="font-size:11px;color:#aaa;margin-bottom:6px;">No node selected</div>
+  <div class="input-row-3">
+    <div class="input-group"><label>Fx (kN)</label><input type="number" id="pl-fx" value="0" step="0.1"></div>
+    <div class="input-group"><label>Fy (kN)</label><input type="number" id="pl-fy" value="0" step="0.1"></div>
+    <div class="input-group"><label>Fz (kN)</label><input type="number" id="pl-fz" value="0" step="0.1"></div>
+  </div>
+  <div class="input-row-3">
+    <div class="input-group"><label>Mx (kNm)</label><input type="number" id="pl-mx" value="0" step="0.1"></div>
+    <div class="input-group"><label>My (kNm)</label><input type="number" id="pl-my" value="0" step="0.1"></div>
+    <div class="input-group"><label>Mz (kNm)</label><input type="number" id="pl-mz" value="0" step="0.1"></div>
+  </div>
+  <button class="action-btn" id="btn-apply-pl" onclick="applyPointLoad()" disabled>Apply to selected node</button>
+  <div class="section-title">Wind Load</div>
+  <div class="input-row">
+    <div class="input-group"><label>Pressure (kN/m&sup2;)</label><input type="number" id="wind-pressure" value="0" step="0.1" min="0"></div>
+    <div class="input-group"><label>Direction</label><select id="wind-dir"><option value="x">+X</option><option value="-x">-X</option><option value="y">+Y</option><option value="-y">-Y</option></select></div>
+  </div>
+  <button class="action-btn" onclick="applyWindLoad()">Apply Wind Load</button>
+  <div class="section-title">Load Visibility</div>
+  <div style="margin-bottom:6px;">
+    <button class="ctrl-btn active" id="btn-toggle-all-loads" onclick="toggleAllLoads(this)" style="width:100%;text-align:center;">Hide All Loads</button>
+  </div>
+  <div class="btn-row" style="flex-wrap:wrap;" id="load-type-btns">
+    <button class="ctrl-btn active" onclick="toggleLoadType('sw',this)">Self-Weight</button>
+    <button class="ctrl-btn active" onclick="toggleLoadType('ll',this)">Live Load</button>
+    <button class="ctrl-btn active" onclick="toggleLoadType('pl',this)">Point Loads</button>
+    <button class="ctrl-btn active" onclick="toggleLoadType('wl',this)">Wind Load</button>
+  </div>
+  <button class="action-btn danger" onclick="clearLoads()">Clear all loads</button>
+  <div style="margin-top:8px;"><span class="status-badge info" id="load-count">0 loaded nodes</span></div>
+  <div class="section-title">Current Point Loads</div>
+  <div id="load-list" style="max-height:200px;overflow-y:auto;font-size:10px;"></div>
+</div>
+
+<!-- Right Panel: Analysis -->
+<div id="panel-analysis" class="panel hidden" style="top:60px;right:16px;padding:16px;min-width:280px;max-width:320px;max-height:calc(100vh - 90px);overflow-y:auto;">
+  <div class="rp-title" style="display:flex;justify-content:space-between;align-items:center;">FEM Analysis <button class="help-btn" onclick="showHelpModal('fem')">?</button></div>
+  <div id="analysis-precheck">
+    <div class="detail-row"><span class="key">Nodes</span><span class="val" id="a-nodes">--</span></div>
+    <div class="detail-row"><span class="key">Beams</span><span class="val" id="a-beams">--</span></div>
+    <div class="detail-row"><span class="key">Supports</span><span class="val" id="a-supports">--</span></div>
+    <div class="detail-row"><span class="key">Loaded nodes</span><span class="val" id="a-loads">--</span></div>
+    <div class="detail-row"><span class="key">Total DOF</span><span class="val" id="a-dof">--</span></div>
+    <div class="detail-row"><span class="key">Restrained DOF</span><span class="val" id="a-rdof">--</span></div>
+    <div class="detail-row"><span class="key">Free DOF</span><span class="val" id="a-fdof">--</span></div>
+    <div id="analysis-warnings" style="margin-top:8px;"></div>
+    <button class="action-btn success" onclick="runFEM()" id="btn-run-fem">Run FEM Analysis</button>
+  </div>
+  <div id="analysis-results" class="hidden">
+    <div class="section-title" style="margin-top:0;border:none;padding-top:0;">Solver</div>
+    <div class="detail-row"><span class="key">Iterations</span><span class="val" id="r-iter">--</span></div>
+    <div class="detail-row"><span class="key">Residual</span><span class="val" id="r-resid">--</span></div>
+    <div class="detail-row"><span class="key">Solve time</span><span class="val" id="r-time">--</span></div>
+    <div class="section-title">Displacements</div>
+    <div class="stat-grid">
+      <div class="result-card"><div class="rc-label">Max |U|</div><div class="rc-value" id="r-maxu">--</div><div class="rc-unit">mm</div></div>
+      <div class="result-card"><div class="rc-label">Max Uz</div><div class="rc-value" id="r-maxuz">--</div><div class="rc-unit">mm</div></div>
+    </div>
+    <div class="section-title">Member Forces</div>
+    <div class="stat-grid">
+      <div class="result-card"><div class="rc-label">Max Axial</div><div class="rc-value" id="r-maxaxial">--</div><div class="rc-unit">kN</div></div>
+      <div class="result-card"><div class="rc-label">Max Moment</div><div class="rc-value" id="r-maxmoment">--</div><div class="rc-unit">kNm</div></div>
+    </div>
+    <div class="section-title">Reactions</div>
+    <div class="detail-row"><span class="key">Sum Rx</span><span class="val" id="r-rx">--</span></div>
+    <div class="detail-row"><span class="key">Sum Ry</span><span class="val" id="r-ry">--</span></div>
+    <div class="detail-row"><span class="key">Sum Rz</span><span class="val" id="r-rz">--</span></div>
+    <div class="detail-row"><span class="key">Applied Fz</span><span class="val" id="r-afz">--</span></div>
+    <div class="section-title">Visualization</div>
+    <div class="btn-row" style="flex-wrap:wrap;">
+      <button class="ctrl-btn active" onclick="setResultView('deformed',this)">Deformed</button>
+      <button class="ctrl-btn" onclick="setResultView('axial',this)">Axial Force</button>
+      <button class="ctrl-btn" onclick="setResultView('moment',this)">Bending</button>
+      <button class="ctrl-btn" onclick="setResultView('reactions',this)">Reactions</button>
+    </div>
+    <div class="input-group" style="margin-top:8px;">
+      <label>Deformation scale: <span id="def-scale-val">50</span>x</label>
+      <input type="range" id="def-scale" min="1" max="500" value="50" oninput="updateDeformScale(this.value)" style="width:100%;">
+    </div>
+    <div class="section-title">Result Colors</div>
+    <div class="input-row">
+      <div class="input-group"><label>Tension</label><input type="color" id="clr-tension" value="#4488ff" onchange="refreshResultColors()"></div>
+      <div class="input-group"><label>Compression</label><input type="color" id="clr-compress" value="#ff4444" onchange="refreshResultColors()"></div>
+    </div>
+    <div class="input-row">
+      <div class="input-group"><label>Deformed</label><input type="color" id="clr-deformed" value="#ff6644" onchange="refreshResultColors()"></div>
+      <div class="input-group"><label>Moment High</label><input type="color" id="clr-moment-hi" value="#ffcc00" onchange="refreshResultColors()"></div>
+    </div>
+    <div class="input-row">
+      <div class="input-group"><label>Moment Low</label><input type="color" id="clr-moment-lo" value="#6644aa" onchange="refreshResultColors()"></div>
+      <div class="input-group"><label>Reactions</label><input type="color" id="clr-reactions" value="#44ff88" onchange="refreshResultColors()"></div>
+    </div>
+    <button class="action-btn" onclick="showResultsTable()">View Results Table</button>
+    <button class="action-btn danger" onclick="clearResults()">Clear Results</button>
+  </div>
+</div>
+
+<!-- Right Panel: Tension Cables -->
+<div id="panel-cables" class="panel hidden" style="top:60px;right:16px;padding:16px;min-width:290px;max-width:320px;max-height:calc(100vh - 90px);overflow-y:auto;">
+  <div class="rp-title">Tension Cables</div>
+  <div style="font-size:10px;color:#778;margin-bottom:10px;">Recommended cable placements to optimise structural stability. Toggle each category on/off.</div>
+  <div class="cable-legend" id="cable-categories"></div>
+  <button class="action-btn success" onclick="generateCables()">Generate Cables</button>
+  <button class="action-btn" onclick="toggleAllCables(true)">Show All</button>
+  <button class="action-btn danger" onclick="toggleAllCables(false)">Hide All</button>
+  <button class="action-btn danger" onclick="clearCables()">Remove All Cables</button>
+  <div class="cable-summary" id="cable-summary" style="display:none;"></div>
+</div>
+
+<!-- Right Panel: Add Member -->
+<div id="panel-add-member" class="panel hidden" style="top:60px;right:16px;padding:16px;min-width:250px;">
+  <div class="rp-title">Add Member</div>
+  <p style="font-size:11px;color:#888;margin-bottom:10px;">Click two nodes to create a new beam between them.</p>
+  <div id="add-member-status" style="font-size:11px;color:#adf;">Click first node...</div>
+  <button class="action-btn danger" onclick="cancelAddMember()">Cancel</button>
+</div>
+
+<!-- Right Panel: Add Column -->
+<div id="panel-add-column" class="panel hidden" style="top:60px;right:16px;padding:16px;min-width:260px;max-width:300px;max-height:calc(100vh - 90px);overflow-y:auto;">
+  <div class="rp-title">Add Column</div>
+  <p style="font-size:10px;color:#778;margin-bottom:10px;">Click a node to create a vertical column down to the base elevation.</p>
+  <div class="section-title" style="margin-top:0;border:none;padding-top:0;">Settings</div>
+  <div class="input-group">
+    <label>Extension below min Z (mm)</label>
+    <input type="number" id="column-extension" value="300" step="50" min="0" onchange="updateColumnExtension()">
+  </div>
+  <p style="font-size:9px;color:#667;margin-bottom:8px;">Column runs from clicked node down to minZ minus this extension.</p>
+  <div class="section-title">Action</div>
+  <div id="add-column-status" style="font-size:11px;color:#adf;margin-bottom:8px;">Click a node to add a column...</div>
+  <div class="section-title">Created Columns</div>
+  <div id="column-list" style="max-height:200px;overflow-y:auto;font-size:10px;">
+    <div style="color:#666;padding:4px;">No columns created</div>
+  </div>
+</div>
+
+<!-- Right Panel: Edit Beam -->
+<div id="panel-edit-beam" class="panel hidden" style="top:60px;right:16px;padding:16px;min-width:270px;">
+  <div class="rp-title">Edit Beam</div>
+  <p style="font-size:11px;color:#888;margin-bottom:10px;">Click a beam to select it. Alternative connections shown automatically.</p>
+  <div id="edit-beam-info" style="display:none;">
+    <div style="font-size:12px;color:#adf;margin-bottom:8px;" id="edit-beam-detail"></div>
+    <button class="action-btn danger" onclick="deleteSelectedBeam()" style="margin-bottom:8px;width:100%;">Delete Beam</button>
+    <div class="section-title" style="margin-top:4px;">Swap Connection</div>
+    <p style="font-size:10px;color:#888;margin-bottom:6px;">Click a colored line in 3D or click below to swap.</p>
+    <div id="swap-options-list" style="margin-bottom:8px;font-size:11px;color:#666;">No alternatives found.</div>
+    <button class="action-btn" onclick="cancelEditBeam()" style="width:100%;margin-top:4px;">Deselect</button>
+  </div>
+  <div id="edit-beam-none" style="font-size:11px;color:#666;">No beam selected. Click a beam to start.</div>
+</div>
+
+<!-- Right Panel: CFD Analysis -->
+<div id="panel-cfd" class="panel hidden" style="top:60px;right:16px;padding:16px;min-width:290px;max-width:330px;max-height:calc(100vh - 90px);overflow-y:auto;">
+  <div class="rp-title" style="display:flex;justify-content:space-between;align-items:center;">CFD Analysis (3D RANS) <button class="help-btn" onclick="showHelpModal('cfd')">?</button></div>
+
+  <div class="section-title" style="margin-top:0;border:none;padding-top:0;">Flow Parameters</div>
+  <div class="input-row">
+    <div class="input-group"><label>Inlet velocity (m/s)</label><input type="number" id="cfd-velocity" value="10" step="0.5" min="0.1"></div>
+    <div class="input-group"><label>Wind angle (deg)</label><input type="number" id="cfd-angle" value="0" min="0" max="360" step="5" style="width:60px;"><span style="font-size:9px;color:#667;margin-left:4px;">0=+X, 90=+Y, 180=-X, 270=-Y</span></div>
+  </div>
+  <div class="input-row">
+    <div class="input-group"><label>Air density (kg/m³)</label><input type="number" id="cfd-rho" value="1.225" step="0.01"></div>
+    <div class="input-group"><label>Viscosity (×10⁻⁵)</label><input type="number" id="cfd-mu" value="1.81" step="0.01"></div>
+  </div>
+
+  <div class="section-title">Turbulence (k-ε)</div>
+  <div class="input-row">
+    <div class="input-group"><label>Intensity (%)</label><input type="number" id="cfd-turb-I" value="5" step="1" min="1" max="30"></div>
+    <div class="input-group"><label>Length scale (m)</label><input type="number" id="cfd-turb-L" value="1.0" step="0.1" min="0.01"></div>
+  </div>
+
+  <div class="section-title">Grid Resolution</div>
+  <div class="input-group">
+    <select id="cfd-resolution" onchange="updateCFDPrecheck()">
+      <option value="quick">Quick (40×20×15) ~12k cells</option>
+      <option value="standard" selected>Standard (80×40×25) ~80k cells</option>
+      <option value="fine">Fine (120×60×35) ~252k cells</option>
+    </select>
+  </div>
+  <div class="input-group"><label>Domain multiplier</label><input type="number" id="cfd-domain-mult" value="3" step="0.5" min="1.5" max="6" onchange="updateCFDPrecheck()"></div>
+
+  <div class="section-title">Solver Settings</div>
+  <div class="input-row">
+    <div class="input-group"><label>Max SIMPLE iters</label><input type="number" id="cfd-max-iter" value="300" step="50" min="50" max="2000"></div>
+    <div class="input-group"><label>Convergence tol</label><input type="number" id="cfd-tol" value="1e-4" step="1e-5"></div>
+  </div>
+
+  <div id="cfd-precheck" style="margin:8px 0;font-size:10px;color:#778;"></div>
+
+  <button class="action-btn" onclick="generateEnvelope()">Generate Envelope Mesh</button>
+  <button class="action-btn success" id="btn-run-cfd" onclick="runCFD()" disabled>Run CFD</button>
+  <button class="action-btn danger" id="btn-cancel-cfd" onclick="cancelCFD()" style="display:none;">Cancel</button>
+
+  <div id="cfd-results" style="display:none;">
+    <div class="section-title">Results</div>
+    <div id="cfd-solve-info" style="font-size:10px;color:#8ab;margin-bottom:6px;"></div>
+
+    <div id="cfd-stats" style="margin-bottom:8px;">
+      <div class="detail-row"><span class="key">Max velocity</span><span class="val" id="cfd-maxv">--</span></div>
+      <div class="detail-row"><span class="key">Dynamic pressure</span><span class="val" id="cfd-dynp">--</span></div>
+      <div class="detail-row"><span class="key">Max pressure</span><span class="val" id="cfd-maxp">--</span></div>
+      <div class="detail-row"><span class="key">Min pressure</span><span class="val" id="cfd-minp">--</span></div>
+      <div class="detail-row"><span class="key">Cp range</span><span class="val" id="cfd-cp">--</span></div>
+    </div>
+
+    <div style="font-size:10px;color:#888;margin-bottom:4px;">Visualization</div>
+    <div class="cfd-viz-row">
+      <button class="cfd-viz-btn active" onclick="setCFDView('vectors',this)">Velocity Vectors</button>
+      <button class="cfd-viz-btn" onclick="setCFDView('pressure',this)">Pressure</button>
+      <button class="cfd-viz-btn" onclick="setCFDView('streamlines',this)">Streamlines</button>
+      <button class="cfd-viz-btn" onclick="setCFDView('slice',this)">Slice Plane</button>
+    </div>
+
+    <div id="cfd-slice-controls" style="display:none;">
+      <div class="input-group"><label>Slice axis</label><select id="cfd-slice-axis" onchange="updateCFDSlice()"><option value="x">X (YZ plane)</option><option value="y" selected>Y (XZ plane)</option><option value="z">Z (XY plane)</option></select></div>
+      <div class="cfd-slider-row">
+        <span style="font-size:10px;color:#888;">Position</span>
+        <input type="range" id="cfd-slice-pos" min="0" max="100" value="50" oninput="updateCFDSlice()">
+        <span class="sv" id="cfd-slice-val">0.0 m</span>
+      </div>
+      <div class="input-group"><label>Field</label><select id="cfd-slice-field" onchange="updateCFDSlice()"><option value="vmag">|V| velocity</option><option value="p">Pressure</option><option value="k">Turb. kinetic energy</option><option value="nut">Turb. viscosity</option></select></div>
+    </div>
+
+    <button class="action-btn" onclick="applyCFDWindLoads()">Apply CFD Wind to FEM</button>
+    <button class="action-btn" style="margin-top:4px;" onclick="showResultsTable('cfd')">View CFD Data Table</button>
+  </div>
+
+  <canvas id="cfd-residual-canvas"></canvas>
+</div>
+
+<!-- Right Panel: Robot Export -->
+<div id="panel-robot" class="panel hidden" style="top:60px;right:16px;padding:16px;min-width:290px;max-width:330px;max-height:calc(100vh - 90px);overflow-y:auto;">
+  <div class="rp-title">Robot Structural Analysis</div>
+  <p style="font-size:10px;color:#778;margin-bottom:10px;">Push the full model to Robot for advanced analysis, then pull results back.</p>
+  <div style="font-size:9px;color:#556;margin-bottom:8px;">Script version: <span id="rb-version">3.0.0</span></div>
+
+  <div class="section-title" style="margin-top:0;border:none;padding-top:0;">Model Summary</div>
+  <div class="detail-row"><span class="key">Nodes</span><span class="val" id="rb-nodes">--</span></div>
+  <div class="detail-row"><span class="key">Members</span><span class="val" id="rb-beams">--</span></div>
+  <div class="detail-row"><span class="key">Supports</span><span class="val" id="rb-supports">--</span></div>
+  <div class="detail-row"><span class="key">Load cases</span><span class="val" id="rb-lcs">--</span></div>
+  <div class="detail-row"><span class="key">Section overrides</span><span class="val" id="rb-sections">--</span></div>
+
+  <div class="section-title">Export to Robot</div>
+  <div class="robot-step">
+    <span class="step-num">1</span><strong style="font-size:11px;color:#cce;">Download Script</strong>
+    <p>Python script that creates the model in Robot via COM API.</p>
+  </div>
+  <div class="input-group" style="margin-bottom:6px;">
+    <label>Script format</label>
+    <select id="robot-format" style="font-size:11px;">
+      <option value="python">Python (pywin32)</option>
+    </select>
+  </div>
+  <div style="margin-bottom:6px;">
+    <label style="font-size:10px;color:#aac;display:flex;align-items:center;gap:4px;cursor:pointer;">
+      <input type="checkbox" id="robot-include-panels" checked style="margin:0;"> Include cladding panels (triangulated rhombuses)
+    </label>
+  </div>
+  <button class="action-btn success" onclick="exportToRobot()">Download Robot Script</button>
+  <button class="help-btn" onclick="showHelpModal('robot')" style="margin-left:6px;vertical-align:middle;">Setup Guide</button>
+  <button class="action-btn" onclick="exportRobotJSON()" style="margin-top:4px;">Export JSON (for C# Add-in)</button>
+
+  <div class="robot-step" style="margin-top:10px;">
+    <span class="step-num">2</span><strong style="font-size:11px;color:#cce;">Run in Robot</strong>
+    <p>Execute the script with Python while Robot is installed. It will open Robot, create the model, run analysis, and save results.</p>
+  </div>
+  <div style="background:rgba(20,25,40,0.6);border-radius:5px;padding:6px 8px;font-family:monospace;font-size:10px;color:#8ab;margin-bottom:6px;">pip install pywin32<br>python robot_export.py</div>
+
+  <div class="robot-step">
+    <span class="step-num">3</span><strong style="font-size:11px;color:#cce;">Import Results</strong>
+    <p>Load the <code style="color:#adf;">robot_results.json</code> generated by the script.</p>
+  </div>
+  <input type="file" id="robot-results-file" accept=".json" style="font-size:10px;color:#888;margin-bottom:6px;width:100%;">
+  <button class="action-btn" onclick="importRobotResults()">Import Robot Results</button>
+
+  <div id="robot-import-status" style="margin-top:8px;"></div>
+</div>
+
+<!-- Bottom Controls -->
+<div id="controls">
+  <div class="ctrl-title">Display</div>
+  <div class="btn-row">
+    <button class="ctrl-btn active" onclick="toggleBeams(this)">Beams</button>
+    <button class="ctrl-btn" onclick="togglePhysicalTubes(this)" id="btn-physical-tubes">Tubes</button>
+    <button class="ctrl-btn" onclick="toggleConnections(this)" id="btn-connections">Connections</button>
+    <button class="ctrl-btn active" onclick="toggleNodes(this)">Nodes</button>
+    <button class="ctrl-btn" onclick="toggleNodeLabels(this)">Node IDs</button>
+    <button class="ctrl-btn" onclick="toggleBeamLabels(this)">Beam IDs</button>
+    <button class="ctrl-btn" onclick="toggleCablesVisibility(this)">Cables</button>
+    <button class="ctrl-btn active" onclick="toggleLoadsVisibility(this)">Loads</button>
+    <button class="ctrl-btn active" onclick="toggleGroupColoring(this)" id="btn-group-colors">Group Colors</button>
+    <button class="ctrl-btn" onclick="toggleAutoRotate(this)">Auto-Rotate</button>
+    <button class="ctrl-btn" onclick="resetView()">Reset View</button>
+    <button class="ctrl-btn" onclick="toggleBackground(this)">Light BG</button>
+    <button class="ctrl-btn active" onclick="toggleGeometryVisibility(this)" id="btn-toggle-geometry">Geometry</button>
+  </div>
+</div>
+
+<!-- Tooltip -->
+<div id="tooltip"><div class="tt-title" id="tt-title"></div><div id="tt-body"></div></div>
+
+<!-- Progress Overlay -->
+<div id="progress-overlay">
+  <div id="progress-box">
+    <h2>FEM Analysis Running</h2>
+    <div id="progress-bar-track"><div id="progress-bar-fill"></div></div>
+    <div id="progress-text">Assembling stiffness matrix...</div>
+  </div>
+</div>
+
+<!-- Results Table Overlay -->
+<div id="table-overlay">
+  <div id="table-header">
+    <h2>FEM Results</h2>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <div class="tab-btns">
+        <button class="tab-btn active" onclick="showTab('nodes',this)">Nodes</button>
+        <button class="tab-btn" onclick="showTab('members',this)">Members</button>
+        <button class="tab-btn" onclick="showTab('cfd',this)">CFD</button>
+      </div>
+      <button class="export-btn" onclick="exportCSV()">Export CSV</button>
+      <button class="close-table-btn" onclick="closeTable()">Close</button>
+    </div>
+  </div>
+  <div id="table-container"><table id="result-table"><thead></thead><tbody></tbody></table></div>
+</div>
+<!-- Help Modals -->
+<div id="help-modal-overlay" onclick="closeHelpModal()" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:500;backdrop-filter:blur(4px);">
+  <div id="help-modal" onclick="event.stopPropagation()" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#141824;border:1px solid rgba(100,140,255,0.25);border-radius:12px;padding:28px 32px;max-width:620px;width:90%;max-height:80vh;overflow-y:auto;color:#cdd;font-size:13px;line-height:1.7;">
+    <button onclick="closeHelpModal()" style="position:absolute;top:12px;right:16px;background:none;border:none;color:#888;font-size:20px;cursor:pointer;">&times;</button>
+    <div id="help-modal-content"></div>
+  </div>
+</div>
+
+</body>
+</html>
