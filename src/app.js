@@ -109,12 +109,26 @@ const memberGroups = new Map([
 const beamGroupMap = new Map(); // beamIndex -> group name
 let groupColoringEnabled = true;
 
+// Column mode state
+let columnExtensionBelow = 0.3; // metres (300mm default)
+const columnBeamIndices = new Set();
+
 // Load cases
 const loadCases = [
   { id: 1, name: 'Dead Load', nature: 'dead', selfWeight: false, liveLoadIntensity: 0, pointLoads: new Map(), windLoad: { pressure: 0, dir: 'x' } }
 ];
 let activeLoadCaseIdx = 0;
 let nextLoadCaseId = 2;
+
+// Load case templates
+const LOAD_TEMPLATES = [
+  { name: 'Dead Load',           nature: 'dead', selfWeight: true,  liveLoadIntensity: 0,   windPressure: 0,   windDir: 'x' },
+  { name: 'Office Live Load',    nature: 'live', selfWeight: false, liveLoadIntensity: 2.5, windPressure: 0,   windDir: 'x' },
+  { name: 'Residential Live',    nature: 'live', selfWeight: false, liveLoadIntensity: 2.0, windPressure: 0,   windDir: 'x' },
+  { name: 'Wind Load +X',        nature: 'wind', selfWeight: false, liveLoadIntensity: 0,   windPressure: 1.0, windDir: 'x' },
+  { name: 'Wind Load +Y',        nature: 'wind', selfWeight: false, liveLoadIntensity: 0,   windPressure: 1.0, windDir: 'y' },
+  { name: 'Snow Load',           nature: 'dead', selfWeight: false, liveLoadIntensity: 0.6, windPressure: 0,   windDir: 'x' },
+];
 
 // CFD state
 let cfdResults = null;
@@ -376,6 +390,7 @@ window.setMatPreset = function(name) {
 // JSON FORMAT DETECTION & PARSING
 // ============================================================
 function detectJSONFormat(data) {
+  if (data.projectVersion && data.nodes && data.beams) return 'project';
   if (data.rows && data.lines) return 'diagrid';
   if (data.nodes && data.beams) return 'legacy';
   return null;
@@ -507,6 +522,15 @@ function clearScene() {
   connectionData = [];
   resetMemberGroups();
   femResults = null;
+  // Reset load cases
+  loadCases.length = 0;
+  loadCases.push({ id: 1, name: 'Dead Load', nature: 'dead', selfWeight: false, liveLoadIntensity: 0, pointLoads: new Map(), windLoad: { pressure: 0, dir: 'x' } });
+  activeLoadCaseIdx = 0;
+  nextLoadCaseId = 2;
+  selfWeightEnabled = false;
+  liveLoadIntensity = 0;
+  windLoad = { pressure: 0, dir: 'x' };
+  columnBeamIndices.clear();
   // Connection detail cleanup
   nodeConnectionData.clear();
   nodeBeamIndices.clear();
@@ -646,6 +670,55 @@ function loadModel(data) {
     parsed.groupAssignments.interior.forEach(bi => assignGroupData(bi, 'Interior'));
     parsed.groupAssignments.perimeter.forEach(bi => assignGroupData(bi, 'Perimeter'));
     parsed.groupAssignments.keyChords.forEach(bi => assignGroupData(bi, 'Key Chords'));
+  } else if (format === 'project') {
+    // Project format — full state restore
+    nodes.length = 0;
+    data.nodes.forEach(n => nodes.push(n));
+    beams.length = 0;
+    data.beams.forEach(b => beams.push(b));
+
+    // Restore beam sections
+    if (data.beamSections) {
+      Object.entries(data.beamSections).forEach(([k, v]) => beamSections.set(parseInt(k), { D: v.D, t: v.t }));
+    }
+    // Restore member groups
+    if (data.memberGroups) {
+      memberGroups.clear();
+      Object.entries(data.memberGroups).forEach(([name, g]) => {
+        memberGroups.set(name, {
+          color: g.color, section: g.section ? { D: g.section.D, t: g.section.t } : null,
+          includeInFEM: g.includeInFEM !== false, visible: g.visible !== false,
+          beamIndices: new Set(g.beamIndices || [])
+        });
+      });
+    }
+    // Restore beam-to-group map
+    if (data.beamGroupMap) {
+      Object.entries(data.beamGroupMap).forEach(([k, v]) => beamGroupMap.set(parseInt(k), v));
+    }
+    // Restore supports
+    if (data.supports) {
+      Object.entries(data.supports).forEach(([k, v]) => supports.set(parseInt(k), { type: v.type, dir: v.dir || null }));
+    }
+    // Restore load cases
+    if (data.loadCases && data.loadCases.length) {
+      loadCases.length = 0;
+      data.loadCases.forEach(lc => {
+        const plMap = new Map();
+        if (lc.pointLoads) Object.entries(lc.pointLoads).forEach(([k, v]) => plMap.set(parseInt(k), v));
+        loadCases.push({
+          id: lc.id, name: lc.name, nature: lc.nature, selfWeight: lc.selfWeight,
+          liveLoadIntensity: lc.liveLoadIntensity, pointLoads: plMap,
+          windLoad: { pressure: lc.windPressure || 0, dir: lc.windDir || 'x' }
+        });
+      });
+      activeLoadCaseIdx = data.activeLoadCaseIdx || 0;
+      nextLoadCaseId = data.nextLoadCaseId || (Math.max(...loadCases.map(lc => lc.id)) + 1);
+    }
+    // Restore column tracking from "Columns" group
+    columnBeamIndices.clear();
+    const colGroup = memberGroups.get('Columns');
+    if (colGroup) colGroup.beamIndices.forEach(bi => columnBeamIndices.add(bi));
   } else {
     // Legacy format
     nodes.length = 0;
@@ -663,6 +736,23 @@ function loadModel(data) {
 
   rebuildScene();
   updateGroupUI();
+
+  // Post-load: restore UI state for project format
+  if (format === 'project') {
+    if (data.globalSection) {
+      document.getElementById('chs-D').value = data.globalSection.D || 355.6;
+      document.getElementById('chs-t').value = data.globalSection.t || 12.5;
+    }
+    if (data.material) {
+      document.getElementById('mat-E').value = data.material.E || 200;
+      document.getElementById('mat-rho').value = data.material.rho || 7850;
+      document.getElementById('mat-G').value = data.material.G || '';
+    }
+    loadLoadCaseToUI(activeLoadCaseIdx);
+    updateLoadCaseUI();
+    updateSupportVisuals();
+    updateStatusCounts();
+  }
 }
 
 // ============================================================
@@ -670,7 +760,7 @@ function loadModel(data) {
 // ============================================================
 // Toolbar group membership for highlighting
 const toolbarGroups = {
-  model: ['import-model','section','add-member','edit-beam','ring-connect'],
+  model: ['import-model','section','add-member','add-column','edit-beam','ring-connect'],
   boundary: ['supports','loads','cables'],
   analysis: ['analysis','cfd','robot']
 };
@@ -692,7 +782,7 @@ window.setMode = function(mode) {
   const panelMap = {
     'import-model': 'panel-import-model', section: 'panel-section', supports: 'panel-supports',
     loads: 'panel-loads', analysis: 'panel-analysis', cables: 'panel-cables',
-    'add-member': 'panel-add-member', 'edit-beam': 'panel-edit-beam', cfd: 'panel-cfd',
+    'add-member': 'panel-add-member', 'add-column': 'panel-add-column', 'edit-beam': 'panel-edit-beam', cfd: 'panel-cfd',
     robot: 'panel-robot', 'ring-connect': 'panel-ring-connect'
   };
   for (const [m, pid] of Object.entries(panelMap)) {
@@ -712,6 +802,7 @@ window.setMode = function(mode) {
   if (mode !== 'section') { document.getElementById('member-edit-section').style.display = 'none'; document.getElementById('beam-group-assign').style.display = 'none'; selectedBeamIdx = null; }
   if (mode === 'section') updateGroupUI();
   if (mode !== 'edit-beam') { cancelEditBeam(); }
+  if (mode === 'add-column') updateColumnList();
 };
 
 document.getElementById('support-type-select').addEventListener('change', e => {
@@ -868,6 +959,22 @@ window.deleteLoadCase = function() {
   if (loadCases.length <= 1) return;
   loadCases.splice(activeLoadCaseIdx, 1);
   activeLoadCaseIdx = Math.min(activeLoadCaseIdx, loadCases.length - 1);
+  loadLoadCaseToUI(activeLoadCaseIdx);
+  updateLoadCaseUI();
+};
+
+window.applyLoadTemplate = function(idx) {
+  const tmpl = LOAD_TEMPLATES[idx];
+  if (!tmpl) return;
+  saveActiveLoadCase();
+  const id = nextLoadCaseId++;
+  loadCases.push({
+    id, name: tmpl.name, nature: tmpl.nature,
+    selfWeight: tmpl.selfWeight, liveLoadIntensity: tmpl.liveLoadIntensity,
+    pointLoads: new Map(),
+    windLoad: { pressure: tmpl.windPressure, dir: tmpl.windDir }
+  });
+  activeLoadCaseIdx = loadCases.length - 1;
   loadLoadCaseToUI(activeLoadCaseIdx);
   updateLoadCaseUI();
 };
@@ -1499,7 +1606,7 @@ function createNewBeam(nid1, nid2) {
   beamGroup.add(mesh);
   // Assign to group based on current mode
   const bi = beamMeshes.length - 1;
-  const group = currentMode === 'ring-connect' ? 'Cross-Section' : 'Interior';
+  const group = currentMode === 'add-column' ? 'Columns' : currentMode === 'ring-connect' ? 'Cross-Section' : 'Interior';
   assignBeamToGroup(bi, group);
   document.getElementById('s-beams').textContent = beams.length;
 }
@@ -1511,6 +1618,105 @@ window.cancelAddMember = function() {
   });
   newMemberNodes = [];
   document.getElementById('add-member-status').textContent = 'Click first node...';
+};
+
+// ============================================================
+// ADD COLUMN
+// ============================================================
+function createColumn(nodeId) {
+  const topNode = nodeMap.get(nodeId);
+  if (!topNode) return;
+
+  const bottomZ = minZ - columnExtensionBelow;
+  const bottomX = topNode.x;
+  const bottomY = topNode.y;
+
+  // Check if a node already exists at that position (tolerance 0.001m)
+  let bottomNodeId = null;
+  for (const n of nodes) {
+    if (Math.abs(n.x - bottomX) < 0.001 && Math.abs(n.y - bottomY) < 0.001 && Math.abs(n.z - bottomZ) < 0.001) {
+      bottomNodeId = n.id;
+      break;
+    }
+  }
+
+  // Create bottom node if not found
+  if (bottomNodeId === null) {
+    const newId = nodes.length > 0 ? Math.max(...nodes.map(n => n.id)) + 1 : 0;
+    const newNode = { id: newId, x: bottomX, y: bottomY, z: bottomZ };
+    nodes.push(newNode);
+    nodeMap.set(newId, newNode);
+    nIdx.set(newId, nodes.length - 1);
+    degree.set(newId, 0);
+    nodeBeamIndices.set(newId, []);
+
+    // Create Three.js mesh for the new node
+    const mat = new THREE.MeshPhongMaterial({ color: defaultNodeColor, shininess: 60, transparent: true, opacity: 0.9 });
+    const mesh = new THREE.Mesh(sphereGeo, mat);
+    mesh.position.copy(m2t(newNode.x, newNode.y, newNode.z));
+    mesh.userData = { type: 'node', id: newId, x: newNode.x, y: newNode.y, z: newNode.z, degree: 0 };
+    nodeMeshes.push(mesh);
+    nodeIdToMeshIdx.set(newId, nodeMeshes.length - 1);
+    nodeGroup.add(mesh);
+
+    minZ = Math.min(minZ, bottomZ);
+    bottomNodeId = newId;
+    document.getElementById('s-nodes').textContent = nodes.length;
+  }
+
+  // Check for duplicate beam
+  const existingBeam = beams.find(b => b && (
+    (b.node_start === nodeId && b.node_end === bottomNodeId) ||
+    (b.node_start === bottomNodeId && b.node_end === nodeId)
+  ));
+  if (existingBeam) {
+    const st = document.getElementById('add-column-status');
+    if (st) st.textContent = `Column already exists for Node #${nodeId}`;
+    return;
+  }
+
+  // Ensure "Columns" group exists
+  if (!memberGroups.has('Columns')) {
+    memberGroups.set('Columns', {
+      color: '#cc66ff', beamIndices: new Set(),
+      section: null, includeInFEM: true, visible: true
+    });
+    updateGroupUI();
+  }
+
+  // Create beam (createNewBeam assigns to 'Columns' when currentMode === 'add-column')
+  createNewBeam(nodeId, bottomNodeId);
+  const bi = beamMeshes.length - 1;
+  columnBeamIndices.add(bi);
+  updateColumnList();
+
+  const st = document.getElementById('add-column-status');
+  if (st) st.textContent = `Column: Node #${nodeId} -> #${bottomNodeId} (Z: ${topNode.z.toFixed(2)} -> ${bottomZ.toFixed(2)})`;
+}
+
+function updateColumnList() {
+  const list = document.getElementById('column-list');
+  if (!list) return;
+  if (!columnBeamIndices.size) {
+    list.innerHTML = '<div style="color:#666;padding:4px;">No columns created</div>';
+    return;
+  }
+  list.innerHTML = '';
+  columnBeamIndices.forEach(bi => {
+    const beam = beams[bi];
+    if (!beam) { columnBeamIndices.delete(bi); return; }
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:3px 4px;border-bottom:1px solid rgba(255,255,255,0.04);gap:4px;';
+    row.innerHTML = `<span style="color:#c6f;font-size:10px;">B#${beam.id}</span>
+      <span style="color:#888;font-size:9px;">${beam.node_start}\u2192${beam.node_end}</span>
+      <span style="color:#667;font-size:9px;">L=${beamLengths[bi]?.toFixed(2)}m</span>`;
+    list.appendChild(row);
+  });
+}
+
+window.updateColumnExtension = function() {
+  const val = parseFloat(document.getElementById('column-extension').value);
+  if (!isNaN(val) && val >= 0) columnExtensionBelow = val / 1000; // input in mm, store in metres
 };
 
 // ============================================================
@@ -2294,6 +2500,13 @@ renderer.domElement.addEventListener('click', e => {
       });
       newMemberNodes = [];
     }
+    return;
+  }
+
+  if (currentMode === 'add-column') {
+    const hits = raycaster.intersectObjects(nodeMeshes);
+    if (!hits.length) return;
+    createColumn(hits[0].object.userData.id);
     return;
   }
 
@@ -4892,6 +5105,68 @@ window.exportRobotJSON = function() {
   a.click();
 };
 
+// ============================================================
+// SAVE / LOAD PROJECT
+// ============================================================
+window.saveProject = function() {
+  saveActiveLoadCase();
+  const globalSec = { D: parseFloat(document.getElementById('chs-D').value), t: parseFloat(document.getElementById('chs-t').value) };
+  const E = parseFloat(document.getElementById('mat-E').value);
+  const rho = parseFloat(document.getElementById('mat-rho').value) || 7850;
+  let G = parseFloat(document.getElementById('mat-G').value);
+  if (isNaN(G) || G <= 0) G = 0;
+
+  // Serialize Maps to plain objects
+  const sectionsObj = {};
+  beamSections.forEach((v, k) => { sectionsObj[k] = { D: v.D, t: v.t }; });
+
+  const groupsObj = {};
+  memberGroups.forEach((g, name) => {
+    groupsObj[name] = {
+      color: g.color, section: g.section ? { D: g.section.D, t: g.section.t } : null,
+      includeInFEM: g.includeInFEM, visible: g.visible,
+      beamIndices: [...g.beamIndices]
+    };
+  });
+
+  const bgMap = {};
+  beamGroupMap.forEach((v, k) => { bgMap[k] = v; });
+
+  const supportsObj = {};
+  supports.forEach((v, k) => { supportsObj[k] = { type: v.type, dir: v.dir || null }; });
+
+  const lcData = loadCases.map(lc => {
+    const pl = {};
+    lc.pointLoads.forEach((v, k) => { pl[k] = v; });
+    return { id: lc.id, name: lc.name, nature: lc.nature, selfWeight: lc.selfWeight,
+      liveLoadIntensity: lc.liveLoadIntensity, pointLoads: pl,
+      windPressure: lc.windLoad.pressure, windDir: lc.windLoad.dir };
+  });
+
+  const activeBeams = beams.filter(b => b).map(b => ({ id: b.id, node_start: b.node_start, node_end: b.node_end }));
+
+  const data = {
+    projectVersion: '1.0',
+    nodes: nodes.map(n => ({ id: n.id, x: n.x, y: n.y, z: n.z })),
+    beams: activeBeams,
+    globalSection: globalSec,
+    material: { E, rho, G },
+    beamSections: sectionsObj,
+    memberGroups: groupsObj,
+    beamGroupMap: bgMap,
+    supports: supportsObj,
+    loadCases: lcData,
+    activeLoadCaseIdx,
+    nextLoadCaseId
+  };
+
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'diagrid_project.json';
+  a.click();
+};
+
 window.exportToRobot = function() {
   saveActiveLoadCase();
 
@@ -5002,6 +5277,9 @@ I_LRT_NODE_FORCE = 0
 I_LRT_BAR_UNIFORM = 5
 I_LRT_DEAD = 7
 NATURE_MAP = {"dead": I_CN_PERMANENT, "live": I_CN_EXPLOATATION, "wind": I_CN_WIND, "custom": I_CN_ACCIDENTAL}
+# Cladding panel constants
+I_LT_CLADDING = 21       # IRobotLabelType for cladding
+I_OT_OBJECT = 6          # IRobotObjectType for generic objects
 
 SCRIPT_VERSION = "${ROBOT_SCRIPT_VERSION}"
 
@@ -5100,10 +5378,16 @@ def main():
     print(f"\\nCreating {len(NODES)} nodes...")
     nodes_server = struct.Nodes
     node_id_map = {}
+    node_errors = 0
     for n in NODES:
         rid = n["id"] + 1
-        node_id_map[n["id"]] = rid
-        nodes_server.Create(rid, n["x"], n["y"], n["z"])
+        try:
+            nodes_server.Create(rid, n["x"], n["y"], n["z"])
+            node_id_map[n["id"]] = rid
+        except Exception as e:
+            node_errors += 1
+            if node_errors <= 3: print(f"  Node {rid} error: {e}")
+    print(f"  Created {len(node_id_map)}/{len(NODES)} nodes")
 
     # --- Bars ---
     print(f"Creating {len(BEAMS)} bars...")
@@ -5127,12 +5411,22 @@ def main():
         objs = struct.Objects
         factory = robot.CmpntFactory
 
+        # Create cladding label (isotropic, two-way load distribution)
+        try:
+            clad_label = labels.Create(I_LT_CLADDING, "Cladding_Iso")
+            clad_data = clad_label.Data
+            clad_data.Type = 2  # I_CT_XY = isotropic
+            labels.Store(clad_label)
+            print("  Created Cladding_Iso label")
+        except Exception as e:
+            print(f"  Warning: cladding label: {e}")
+
         # Build node coordinate lookup from NODES data
         node_coords = {}
         for n in NODES:
             node_coords[n["id"]] = (n["x"], n["y"], n["z"])
 
-        # Phase 1: Create all contours from coordinates
+        # Create contours and assign cladding label
         objs.BeginMultiOperation()
         panel_ids = []
         panel_errors = 0
@@ -5155,15 +5449,17 @@ def main():
         objs.EndMultiOperation()
         print(f"  Created {len(panel_ids)}/{len(PANELS)} contours")
 
-        # Phase 2: Convert all to cladding type
+        # Assign cladding label to all panels
         cladding_ok = 0
         for pid in panel_ids:
             try:
-                objs.SetStructuralType(pid, 5)  # 5 = cladding
+                sel = struct.Selections.Create(I_OT_OBJECT)
+                sel.AddOne(pid)
+                objs.SetLabel(sel, I_LT_CLADDING, "Cladding_Iso")
                 cladding_ok += 1
             except:
                 pass
-        print(f"  Converted {cladding_ok}/{len(panel_ids)} to cladding")
+        print(f"  Assigned cladding label to {cladding_ok}/{len(panel_ids)} panels")
 
     # --- Supports ---
     print(f"Applying {len(SUPPORTS)} supports...")

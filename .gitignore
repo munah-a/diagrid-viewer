@@ -7,3 +7,20 @@ dist/
 .vite/
 coverage/
 *.tgz
+
+# Robot API test/debug scripts
+robot_*.py
+robot_*.rtd
+robot_*.vbs
+robot_*.json
+click_analysis.py
+Robot API.pdf
+
+# Robot addin binaries
+robot-addin/
+
+# Screenshots
+screenshot*.png
+
+# Claude config
+.claude/
