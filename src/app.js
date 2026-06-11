@@ -100,10 +100,11 @@ const beamSections = new Map(); // beamIndex -> {D, t} per-beam overrides (highe
 let physicalTubeMode = false; // true = render beams at real CHS diameter
 
 // Member groups — section/FEM/visibility per group
-const FIXED_GROUPS = ['Interior', 'Perimeter', 'Key Chords'];
+const FIXED_GROUPS = ['Interior', 'Perimeter', 'Chords', 'Key Chords'];
 const memberGroups = new Map([
   ['Interior',      { color: '#5a8de6', beamIndices: new Set(), section: null, includeInFEM: true, visible: true }],
   ['Perimeter',     { color: '#ffaa44', beamIndices: new Set(), section: { D: 323.9, t: 10 }, includeInFEM: true, visible: true }],
+  ['Chords',        { color: '#c266ff', beamIndices: new Set(), section: null, includeInFEM: true, visible: true }],
   ['Key Chords',    { color: '#66ff88', beamIndices: new Set(), section: null, includeInFEM: true, visible: true }],
 ]);
 const beamGroupMap = new Map(); // beamIndex -> group name
@@ -450,15 +451,14 @@ function parseDiagridJSON(data) {
     return newId;
   }
 
-  // Build beams from lines, tracking group assignments.
-  // Accept `chords` as an alias for `key_chords`.
+  // Build beams from lines, tracking group assignments. `chords` and
+  // `key_chords` are distinct line categories and are kept as separate groups.
   const parsedBeams = [];
-  const groups = { interior: new Set(), perimeter: new Set(), keyChords: new Set() };
+  const groups = { interior: new Set(), perimeter: new Set(), chords: new Set(), keyChords: new Set() };
   let beamId = 0;
   let droppedLines = 0;
 
-  const keyChordArr = data.lines.key_chords || data.lines.chords;
-  for (const [category, lineArr] of [['interior', data.lines.interior], ['perimeter', data.lines.perimeter], ['keyChords', keyChordArr]]) {
+  for (const [category, lineArr] of [['interior', data.lines.interior], ['perimeter', data.lines.perimeter], ['chords', data.lines.chords], ['keyChords', data.lines.key_chords]]) {
     if (!lineArr) continue;
     for (const line of lineArr) {
       const nStart = getOrCreateNodeId(line.start);
@@ -488,6 +488,8 @@ function resetMemberGroups() {
     memberGroups.set('Interior', { color: '#5a8de6', beamIndices: new Set(), section: null, includeInFEM: true, visible: true });
   if (!memberGroups.has('Perimeter'))
     memberGroups.set('Perimeter', { color: '#ffaa44', beamIndices: new Set(), section: { D: 323.9, t: 10 }, includeInFEM: true, visible: true });
+  if (!memberGroups.has('Chords'))
+    memberGroups.set('Chords', { color: '#c266ff', beamIndices: new Set(), section: null, includeInFEM: true, visible: true });
   if (!memberGroups.has('Key Chords'))
     memberGroups.set('Key Chords', { color: '#66ff88', beamIndices: new Set(), section: null, includeInFEM: true, visible: true });
   // Remove any user-created groups
@@ -692,6 +694,7 @@ function loadModel(data) {
     }
     parsed.groupAssignments.interior.forEach(bi => assignGroupData(bi, 'Interior'));
     parsed.groupAssignments.perimeter.forEach(bi => assignGroupData(bi, 'Perimeter'));
+    parsed.groupAssignments.chords.forEach(bi => assignGroupData(bi, 'Chords'));
     parsed.groupAssignments.keyChords.forEach(bi => assignGroupData(bi, 'Key Chords'));
     lastDiagridImportStats = parsed.stats || null;
   } else if (format === 'project') {
