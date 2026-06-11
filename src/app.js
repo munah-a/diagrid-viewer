@@ -107,6 +107,7 @@ const memberGroups = new Map([
   ['Key Chords',    { color: '#66ff88', beamIndices: new Set(), section: null, includeInFEM: true, visible: true }],
 ]);
 const beamGroupMap = new Map(); // beamIndex -> group name
+let lastDiagridImportStats = null; // {createdNodes, droppedLines} from last diagrid import
 let groupColoringEnabled = true;
 
 // Column mode state
@@ -399,6 +400,7 @@ function detectJSONFormat(data) {
 function parseDiagridJSON(data) {
   const parsedNodes = [];
   const parsedNodeRowMap = new Map();
+  let maxNodeId = -1;
 
   // Build nodes from rows
   for (const row of data.rows) {
@@ -407,6 +409,7 @@ function parseDiagridJSON(data) {
       const [x, y, z] = row.coords[li];
       parsedNodes.push({ id, x, y, z, row: row.index });
       parsedNodeRowMap.set(id, row.index);
+      if (id > maxNodeId) maxNodeId = id;
     }
   }
 
@@ -417,31 +420,50 @@ function parseDiagridJSON(data) {
     coordToId.set(key, n.id);
   }
 
-  function findNodeId(coords) {
+  let createdNodes = 0;
+
+  // Resolve a coordinate to a node id. Lines (especially key chords) may
+  // reference endpoints that are not listed in `rows` — rather than silently
+  // dropping those lines, create a node for the unmatched coordinate so the
+  // line still imports.
+  function getOrCreateNodeId(coords) {
+    if (!Array.isArray(coords) || coords.length < 3 ||
+        !Number.isFinite(coords[0]) || !Number.isFinite(coords[1]) || !Number.isFinite(coords[2])) {
+      return null;
+    }
     const key = `${coords[0].toFixed(4)},${coords[1].toFixed(4)},${coords[2].toFixed(4)}`;
     const id = coordToId.get(key);
     if (id !== undefined) return id;
-    // Tolerance fallback
+    // Tolerance fallback (handles float noise just beyond rounding)
     const tol = 1e-3;
     for (const n of parsedNodes) {
       if (Math.abs(n.x - coords[0]) < tol && Math.abs(n.y - coords[1]) < tol && Math.abs(n.z - coords[2]) < tol) {
         return n.id;
       }
     }
-    return null;
+    // No match — create a new node for this endpoint
+    const newId = ++maxNodeId;
+    const newNode = { id: newId, x: coords[0], y: coords[1], z: coords[2], row: null };
+    parsedNodes.push(newNode);
+    coordToId.set(key, newId);
+    createdNodes++;
+    return newId;
   }
 
-  // Build beams from lines, tracking group assignments
+  // Build beams from lines, tracking group assignments.
+  // Accept `chords` as an alias for `key_chords`.
   const parsedBeams = [];
   const groups = { interior: new Set(), perimeter: new Set(), keyChords: new Set() };
   let beamId = 0;
+  let droppedLines = 0;
 
-  for (const [category, lineArr] of [['interior', data.lines.interior], ['perimeter', data.lines.perimeter], ['keyChords', data.lines.key_chords]]) {
+  const keyChordArr = data.lines.key_chords || data.lines.chords;
+  for (const [category, lineArr] of [['interior', data.lines.interior], ['perimeter', data.lines.perimeter], ['keyChords', keyChordArr]]) {
     if (!lineArr) continue;
     for (const line of lineArr) {
-      const nStart = findNodeId(line.start);
-      const nEnd = findNodeId(line.end);
-      if (nStart === null || nEnd === null) continue;
+      const nStart = getOrCreateNodeId(line.start);
+      const nEnd = getOrCreateNodeId(line.end);
+      if (nStart === null || nEnd === null || nStart === nEnd) { droppedLines++; continue; }
       const bi = parsedBeams.length;
       parsedBeams.push({ id: beamId++, node_start: nStart, node_end: nEnd });
       groups[category].add(bi);
@@ -454,7 +476,8 @@ function parseDiagridJSON(data) {
     groupAssignments: groups,
     nodeRowMap: parsedNodeRowMap,
     rowData: data.rows,
-    connectionData: data.connections || []
+    connectionData: data.connections || [],
+    stats: { createdNodes, droppedLines }
   };
 }
 
@@ -670,6 +693,7 @@ function loadModel(data) {
     parsed.groupAssignments.interior.forEach(bi => assignGroupData(bi, 'Interior'));
     parsed.groupAssignments.perimeter.forEach(bi => assignGroupData(bi, 'Perimeter'));
     parsed.groupAssignments.keyChords.forEach(bi => assignGroupData(bi, 'Key Chords'));
+    lastDiagridImportStats = parsed.stats || null;
   } else if (format === 'project') {
     // Project format — full state restore
     nodes.length = 0;
@@ -4267,9 +4291,16 @@ window.importModel = function() {
         }
       }
 
+      lastDiagridImportStats = null;
       loadModel(data);
       const formatLabel = format === 'diagrid' ? 'diagrid' : 'legacy';
-      statusEl.innerHTML = `<span class="status-badge ok">Loaded ${nodes.length} nodes, ${beams.length} beams (${formatLabel} format)</span>`;
+      let extra = '';
+      if (lastDiagridImportStats) {
+        const { createdNodes, droppedLines } = lastDiagridImportStats;
+        if (createdNodes > 0) extra += ` <span style="color:#fc8;">(+${createdNodes} nodes created for off-row line endpoints)</span>`;
+        if (droppedLines > 0) extra += ` <span style="color:#f88;">(${droppedLines} lines skipped — invalid/degenerate coords)</span>`;
+      }
+      statusEl.innerHTML = `<span class="status-badge ok">Loaded ${nodes.length} nodes, ${beams.length} beams (${formatLabel} format)</span>${extra}`;
     } catch (err) {
       statusEl.innerHTML = `<span class="status-badge warn">Parse error: ${err.message}</span>`;
     }
